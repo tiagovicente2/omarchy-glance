@@ -28,7 +28,34 @@ BarWidget {
   // What the bar shows is what shell.json stores, so a cycled format is the
   // format from then on rather than something that reverts on restart.
   readonly property string activeFormat: configuredFormat
-  readonly property string displayText: formatted(displayDate)
+
+  // ---- The next thing coming up. The panel owns the file and the calendar
+  //      filtering; the bar just reads the already-filtered list off it. The
+  //      panel Loader is active even while closed, so this keeps counting
+  //      whether or not anyone has opened the calendar.
+  //
+  //      displayDate is driven by SystemClock at minute precision, which is
+  //      exactly the granularity a "in 10min" countdown needs. No extra timer.
+  readonly property var visibleEventList: panelLoader.item ? panelLoader.item.visibleEventList : []
+  readonly property real nowMs: displayDate.getTime()
+
+  readonly property int announceLeadMinutes: setting("announceLeadMinutes", 15)
+  readonly property var upcomingEvent: Model.nextEvent(visibleEventList, nowMs)
+  readonly property bool announcing: announceLeadMinutes > 0
+    && Model.shouldAnnounce(upcomingEvent, nowMs, announceLeadMinutes)
+
+  readonly property string countdownPhrase: announcing
+    ? (Model.formatCountdown(Model.millisUntil(upcomingEvent, nowMs)) || "")
+    : ""
+
+  // The clock stays. This widget replaces the desktop's clock, so trading the
+  // time away for a title would be a downgrade the rest of the day pays for.
+  //
+  // A vertical bar is left as a clock: it is a narrow column of stacked
+  // lines, and an event title has nowhere to go in it.
+  readonly property string displayText: vertical || countdownPhrase === ""
+    ? formatted(displayDate)
+    : Model.announceLabel(formatted(displayDate), upcomingEvent.title, countdownPhrase)
   readonly property var verticalLines: displayText.split("\n")
 
   function refresh() {

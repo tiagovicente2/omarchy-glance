@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "id": "omarchy-glance",
   "name": "Omarchy Glance",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "Tiago Vicente",
-  "description": "Centered calendar with interactive recent notification history",
+  "description": "Centered calendar, Caldir agenda, and interactive notification history",
   "kinds": [
     "bar-widget"
   ],
@@ -13,9 +13,67 @@
   },
   "barWidget": {
     "displayName": "Omarchy Glance",
-    "description": "Centered calendar with interactive recent notification history",
+    "description": "Calendar, Caldir agenda, and recent notifications",
     "category": "Time",
-    "allowMultiple": false
+    "allowMultiple": false,
+    "defaults": {
+      "format": "dddd HH:mm",
+      "formatAlt": "d MMMM 'W'ww yyyy",
+      "verticalFormat": "HH\n—\nmm",
+      "announceLeadMinutes": 15,
+      "showYearProgress": false,
+      "hideDeclined": false
+    },
+    "schema": [
+      {
+        "key": "format",
+        "type": "string",
+        "label": "Date format",
+        "defaultValue": "dddd HH:mm"
+      },
+      {
+        "key": "formatAlt",
+        "type": "string",
+        "label": "Alternate format",
+        "defaultValue": "d MMMM 'W'ww yyyy"
+      },
+      {
+        "key": "verticalFormat",
+        "type": "string",
+        "label": "Vertical bar format",
+        "defaultValue": "HH\n—\nmm"
+      },
+      {
+        "key": "announceLeadMinutes",
+        "type": "number",
+        "label": "Event announcement lead (minutes)",
+        "defaultValue": 15
+      },
+      {
+        "key": "showYearProgress",
+        "type": "boolean",
+        "label": "Show year and life progress",
+        "defaultValue": false
+      },
+      {
+        "key": "hideDeclined",
+        "type": "boolean",
+        "label": "Hide declined invitations",
+        "defaultValue": false
+      },
+      {
+        "key": "birthYear",
+        "type": "number",
+        "label": "Birth year",
+        "defaultValue": 0
+      },
+      {
+        "key": "lifeExpectancy",
+        "type": "number",
+        "label": "Life expectancy",
+        "defaultValue": 0
+      }
+    ]
   },
   "omarchy": {
     "clonedFrom": "omarchy.clock"

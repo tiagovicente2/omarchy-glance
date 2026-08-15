@@ -291,6 +291,7 @@ Item {
               anchors.centerIn: parent
               visible: !cardIcon.visible && card.glyph !== ""
               text: card.glyph
+              textFormat: Text.PlainText
               color: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.icon
@@ -317,6 +318,7 @@ Item {
               Text {
                 Layout.fillWidth: true
                 text: card.summary !== "" ? card.summary : card.app
+                textFormat: Text.PlainText
                 color: root.foreground
                 font.family: "Liberation Sans"
                 font.pixelSize: Style.font.subtitle
@@ -350,6 +352,7 @@ Item {
               Layout.fillWidth: true
               visible: !card.opens && card.app !== ""
               text: card.app
+              textFormat: Text.PlainText
               color: Qt.darker(root.dimForeground, 1.2)
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption

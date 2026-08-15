@@ -220,7 +220,7 @@ function lifeProgressPercent(age, expectancy) {
 // Always six rows of seven days. A fixed grid keeps the popup exactly the
 // same height in every month, so stepping through the year never makes the
 // panel jump under the pointer.
-function monthGrid(year, month, weekStart, todayKey) {
+function monthGrid(year, month, weekStart, todayKey, eventIndex) {
   var start = normalizedWeekStart(weekStart, 1)
   var leading = (new Date(year, month, 1).getDay() - start + 7) % 7
   var cursor = new Date(year, month, 1 - leading)
@@ -245,7 +245,9 @@ function monthGrid(year, month, weekStart, todayKey) {
         weekday: weekday,
         inMonth: cellMonth === month && cellYear === year,
         weekend: weekday === 0 || weekday === 6,
-        today: key === today
+        today: key === today,
+        hasEvent: eventIndex ? !!eventIndex[key] : false,
+        dots: eventIndex ? eventColors(eventIndex, key, 3) : []
       })
       cursor.setDate(cursor.getDate() + 1)
     }
@@ -265,6 +267,285 @@ function monthGrid(year, month, weekStart, todayKey) {
 function stepMonth(year, month, delta) {
   var target = new Date(year, Number(month) + Number(delta), 1)
   return { year: target.getFullYear(), month: target.getMonth() }
+}
+
+// Event helpers. The widget renders whatever the sync wrote; none of this
+// knows where the events came from.
+
+var STALE_INTERVAL_MULTIPLIER = 4
+
+function indexEventsByDate(events) {
+  var index = {}
+  if (!events || !events.length) return index
+  for (var i = 0; i < events.length; i++) {
+    var event = events[i]
+    var key = event && event.dateKey
+    if (!key) continue
+    if (!index[key]) index[key] = []
+    index[key].push(event)
+  }
+  return index
+}
+
+function eventsForDateKey(index, dateKey) {
+  if (!index || !dateKey) return []
+  return index[dateKey] || []
+}
+
+// The calendars present in a synced document, in display order, each with
+// the colour the sync resolved for it. Derived from the events themselves so
+// the widget needs no separate calendar list and no configuration file: it
+// can only ever offer you calendars you actually have events in.
+function calendarsInDocument(doc) {
+  var events = (doc && doc.events) || []
+  var byId = {}
+  var ordered = []
+
+  for (var i = 0; i < events.length; i++) {
+    var event = events[i]
+    var id = event && event.calendarId
+    if (!id || byId[id]) continue
+    byId[id] = true
+    ordered.push({
+      id: id,
+      name: event.calendarName || id,
+      color: event.color || ""
+    })
+  }
+
+  ordered.sort(function(a, b) {
+    return a.name.localeCompare(b.name)
+  })
+  return ordered
+}
+
+function isCalendarHidden(hidden, calendarId) {
+  if (!hidden || !hidden.length) return false
+  return hidden.indexOf(String(calendarId)) !== -1
+}
+
+// Returns a new list rather than mutating, so the caller can hand the result
+// straight to persistSettings without touching the settings object in place.
+function toggleHiddenCalendar(hidden, calendarId) {
+  var id = String(calendarId)
+  var next = []
+  var found = false
+
+  for (var i = 0; i < (hidden || []).length; i++) {
+    if (String(hidden[i]) === id) { found = true; continue }
+    next.push(hidden[i])
+  }
+
+  if (!found) next.push(id)
+  return next
+}
+
+function isDeclined(event) {
+  return !!event && String(event.responseStatus || "") === "declined"
+}
+
+// Only https is ever launched. A meeting link is supplied by whoever sent the
+// invitation, so treating it as trusted input would be a mistake.
+function safeUrl(url) {
+  var text = String(url || "").trim()
+  if (text.indexOf("https://") !== 0) return ""
+  if (/[\s"'<>]/.test(text)) return ""
+  return text
+}
+
+// Turn the QML file URL of a bundled script into something a person can paste.
+// Derived rather than hardcoded: `omarchy plugin add` uses the manifest id, but
+// a hand-cloned checkout can live anywhere, and a wrong path in the one message
+// a new user sees is worse than no message.
+function commandPathFromUrl(fileUrl, home) {
+  var text = String(fileUrl || "")
+  if (text.indexOf("file://") === 0) text = text.substring(7)
+  try { text = decodeURIComponent(text) } catch (error) { /* keep malformed escapes literal */ }
+  if (home && text.indexOf(home + "/") === 0) text = "~" + text.substring(home.length)
+  return text
+}
+
+function meetingUrlFor(event) {
+  return event ? safeUrl(event.meetingUrl) : ""
+}
+
+// How long before the start, and after the end, a meeting still counts as
+// joinable. A Join button on next Tuesday's meeting is noise that dilutes the
+// one that matters, so the affordance only appears around the actual time.
+var JOIN_LEAD_MINUTES = 15
+var JOIN_GRACE_MINUTES = 15
+
+function isJoinableNow(event, nowMs, todayKey) {
+  if (!meetingUrlFor(event)) return false
+
+  // An all-day event has no useful clock window, so it stays joinable for the
+  // whole day it belongs to.
+  if (event.allDay) return event.dateKey === todayKey
+
+  var startMs = Date.parse(event.start)
+  var endMs = Date.parse(event.end)
+  if (isNaN(startMs)) return false
+  if (isNaN(endMs) || endMs < startMs) endMs = startMs
+
+  var opensAt = startMs - JOIN_LEAD_MINUTES * 60 * 1000
+  var closesAt = endMs + JOIN_GRACE_MINUTES * 60 * 1000
+  return nowMs >= opensAt && nowMs <= closesAt
+}
+
+function visibleEvents(events, hidden, options) {
+  if (!events || !events.length) return []
+
+  var dropDeclined = options && options.hideDeclined === true
+  var visible = []
+  for (var i = 0; i < events.length; i++) {
+    var event = events[i]
+    if (isCalendarHidden(hidden, event.calendarId)) continue
+    if (dropDeclined && isDeclined(event)) continue
+    visible.push(event)
+  }
+  return visible
+}
+
+// ---- The next thing coming up.
+
+var MINUTE_MS = 60 * 1000
+var HOUR_MS = 60 * MINUTE_MS
+var DAY_MS = 24 * HOUR_MS
+
+// All-day events are deliberately excluded. They start at midnight, so a
+// countdown to one either reads as hours in the past or as tomorrow, and
+// neither tells you anything you wanted to know.
+function nextEvent(events, nowMs) {
+  var best = null
+  var bestMs = null
+
+  for (var i = 0; i < (events || []).length; i++) {
+    var event = events[i]
+    if (!event || event.allDay) continue
+
+    var startMs = Date.parse(event.start)
+    if (isNaN(startMs) || startMs < nowMs) continue
+
+    if (bestMs === null || startMs < bestMs) {
+      bestMs = startMs
+      best = event
+    }
+  }
+
+  return best
+}
+
+// The popup's "what is next" line is scoped to today on purpose. Something
+// eighteen hours out is tomorrow, and answering "what is next" with tomorrow
+// is noise when the day's agenda is listed right below it.
+function nextEventToday(events, nowMs, todayKey) {
+  var todays = []
+  for (var i = 0; i < (events || []).length; i++) {
+    if (events[i] && events[i].dateKey === todayKey) todays.push(events[i])
+  }
+  return nextEvent(todays, nowMs)
+}
+
+// Returns null past a day out, which is the caller's signal to show nothing
+// rather than a countdown nobody is acting on.
+function formatCountdown(deltaMs) {
+  if (deltaMs === null || isNaN(deltaMs) || deltaMs < 0 || deltaMs >= DAY_MS) return null
+  if (deltaMs < MINUTE_MS) return "now"
+
+  var minutes = Math.floor(deltaMs / MINUTE_MS)
+  if (minutes < 60) return "in " + minutes + "min"
+
+  var hours = Math.floor(minutes / 60)
+  var rest = minutes % 60
+  return rest === 0 ? "in " + hours + "h" : "in " + hours + "h " + rest + "min"
+}
+
+var MAX_ANNOUNCE_TITLE = 28
+
+// A bar label is a fixed budget of horizontal space shared with every other
+// widget, so a long event title has to give.
+function truncateTitle(title, limit) {
+  var text = String(title === undefined || title === null ? "" : title)
+  var max = limit || MAX_ANNOUNCE_TITLE
+  if (text.length <= max) return text
+  return text.substring(0, max - 1).replace(/\s+$/, "") + "…"
+}
+
+// The clock is kept rather than replaced. Giving it up was a real cost for a
+// widget whose whole job used to be telling the time, and there is room for
+// both.
+// WidgetButton does not expose Text.textFormat. Neutralize rich-text markers
+// before external event titles reach its AutoText label.
+function plainTextForAutoText(value) {
+  return String(value === undefined || value === null ? "" : value)
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/&/g, "＆")
+    .replace(/</g, "‹")
+    .replace(/>/g, "›")
+}
+
+function announceLabel(clockText, title, countdown, limit) {
+  if (!countdown) return clockText
+  var shown = truncateTitle(plainTextForAutoText(title), limit)
+  if (!shown) return clockText
+  return clockText + "  ·  " + shown + " " + countdown
+}
+
+// How long until an event starts, or null when it cannot be read.
+function millisUntil(event, nowMs) {
+  if (!event) return null
+  var startMs = Date.parse(event.start)
+  if (isNaN(startMs)) return null
+  return startMs - nowMs
+}
+
+// The bar label only gives up the clock when something is close enough to
+// act on. Further out it stays a clock, which is what it is most of the day.
+function shouldAnnounce(event, nowMs, leadMinutes) {
+  var delta = millisUntil(event, nowMs)
+  if (delta === null || delta < 0) return false
+  return delta <= leadMinutes * MINUTE_MS
+}
+
+// Turn a YYYY-MM-DD key back into a local Date, for formatting a heading.
+// Built field by field rather than parsed from the string, because
+// new Date("2026-08-10") is UTC midnight and lands on the previous day for
+// anyone west of Greenwich.
+function dateFromKey(dateKey, fallback) {
+  var parts = String(dateKey || "").split("-")
+  if (parts.length !== 3) return fallback
+
+  var year = parseInt(parts[0], 10)
+  var month = parseInt(parts[1], 10)
+  var day = parseInt(parts[2], 10)
+  if (isNaN(year) || isNaN(month) || isNaN(day)) return fallback
+
+  return new Date(year, month - 1, day)
+}
+
+function eventColors(index, dateKey, limit) {
+  var events = eventsForDateKey(index, dateKey)
+  var colors = []
+  for (var i = 0; i < events.length; i++) {
+    var color = events[i].color
+    if (!color || colors.indexOf(color) !== -1) continue
+    colors.push(color)
+    if (limit > 0 && colors.length >= limit) break
+  }
+  return colors
+}
+
+// "missing" means we have nothing to show and should say so rather than
+// render an empty calendar that looks like a quiet week.
+function syncState(doc, nowMs, intervalSeconds) {
+  if (!doc || !doc.syncedAt) return "missing"
+
+  var syncedMs = Date.parse(doc.syncedAt)
+  if (isNaN(syncedMs)) return "missing"
+
+  var thresholdMs = intervalSeconds * STALE_INTERVAL_MULTIPLIER * 1000
+  return (nowMs - syncedMs) > thresholdMs ? "stale" : "ok"
 }
 
 if (typeof module !== "undefined") {
@@ -291,6 +572,28 @@ if (typeof module !== "undefined") {
     clockFormats: clockFormats,
     clockFormatRing: clockFormatRing,
     nextClockFormat: nextClockFormat,
-    isoWeekLiteral: isoWeekLiteral
+    isoWeekLiteral: isoWeekLiteral,
+    indexEventsByDate: indexEventsByDate,
+    dateFromKey: dateFromKey,
+    calendarsInDocument: calendarsInDocument,
+    nextEvent: nextEvent,
+    nextEventToday: nextEventToday,
+    formatCountdown: formatCountdown,
+    truncateTitle: truncateTitle,
+    announceLabel: announceLabel,
+    millisUntil: millisUntil,
+    shouldAnnounce: shouldAnnounce,
+    isCalendarHidden: isCalendarHidden,
+    toggleHiddenCalendar: toggleHiddenCalendar,
+    visibleEvents: visibleEvents,
+    isDeclined: isDeclined,
+    safeUrl: safeUrl,
+    commandPathFromUrl: commandPathFromUrl,
+    plainTextForAutoText: plainTextForAutoText,
+    meetingUrlFor: meetingUrlFor,
+    isJoinableNow: isJoinableNow,
+    eventsForDateKey: eventsForDateKey,
+    eventColors: eventColors,
+    syncState: syncState
   }
 }

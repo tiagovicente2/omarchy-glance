@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Layouts
 import Quickshell
+import Quickshell.Io
 import qs.Commons
 import qs.Ui
 import "Model.js" as Model
@@ -67,16 +68,153 @@ Panel {
   readonly property int weekStart: Model.normalizedWeekStart(setting("weekStartDay", null), Qt.locale().firstDayOfWeek)
   readonly property string nextWeekStartLabel: Qt.locale().dayName(Model.toggledWeekStart(weekStart), Locale.LongFormat)
   readonly property var weekdays: Model.weekdayOrder(weekStart)
-  readonly property var weeks: Model.monthGrid(viewYear, viewMonth, weekStart, todayKey)
+  readonly property var weeks: Model.monthGrid(viewYear, viewMonth, weekStart, todayKey, eventIndex)
+
+  // ---- Events, read from whatever wrote the state file. The panel never
+  //      learns where they came from: Google, khal, an ICS feed and a shell
+  //      script all look identical from here.
+  property var eventDoc: null
+  property var eventIndex: ({})
+  property bool eventVersionMismatch: false
+
+  // Matches the sync timer's interval. Model.syncState allows four of these
+  // to elapse before calling the file stale, so one missed run stays quiet.
+  readonly property int syncIntervalSeconds: 300
+
+  // The adapter reads renCal's local Caldir through the official caldir CLI.
+  // It is bundled with the plugin and runs without owning provider credentials.
+  readonly property string exporterPath: Model.commandPathFromUrl(
+    Qt.resolvedUrl("sync/caldir-export"), "")
+  property string exportError: ""
+  property bool exportPending: false
+  readonly property string syncState: eventVersionMismatch
+    ? "version"
+    : Model.syncState(eventDoc, Date.now(), syncIntervalSeconds)
+
+  // The day whose agenda is listed under the grid. The upstream clock had no
+  // cursor at all, so this is the one place the fork departs from it.
+  property string selectedDayKey: todayKey
+  readonly property var selectedEvents: Model.eventsForDateKey(eventIndex, selectedDayKey)
+  readonly property date selectedDate: Model.dateFromKey(selectedDayKey, today)
+
+  function selectDay(key) {
+    root.selectedDayKey = String(key)
+  }
+
+  function applyEvents(raw) {
+    var doc = null
+    var mismatch = false
+
+    if (raw) {
+      try {
+        var parsed = JSON.parse(raw)
+        if (parsed && parsed.version === 1) {
+          doc = parsed
+        } else if (parsed && parsed.version !== undefined) {
+          // Written by a newer sync than this widget understands. Say so
+          // rather than render an empty month that reads as a quiet week.
+          mismatch = true
+        }
+      } catch (error) {
+        doc = null
+      }
+    }
+
+    root.eventDoc = doc
+    root.eventVersionMismatch = mismatch
+    root.rebuildIndex()
+  }
+
+  // Flat, already filtered. BarWidget.qml reads this to work out what is
+  // coming up next, so the bar label can count down without the popup ever
+  // being opened.
+  property var visibleEventList: []
+
+  function rebuildIndex() {
+    var all = root.eventDoc ? root.eventDoc.events : []
+    root.visibleEventList = Model.visibleEvents(all, root.hiddenCalendars, {
+      hideDeclined: root.hideDeclined
+    })
+    root.eventIndex = Model.indexEventsByDate(root.visibleEventList)
+  }
+
+  // Ticks every minute regardless of whether the day rolled over, which is
+  // what a countdown needs. `today` deliberately only moves at midnight.
+  property date nowTick: new Date()
+  readonly property var upcomingEvent: Model.nextEventToday(visibleEventList, nowTick.getTime(), todayKey)
+  readonly property string upcomingCountdown: Model.formatCountdown(Model.millisUntil(upcomingEvent, nowTick.getTime())) || ""
+
+  // The year and life bars are the upstream clock's, kept but opt-in. What
+  // most people want in that slot is what is coming up next, not how much of
+  // the year is gone.
+  readonly property bool showYearProgress: setting("showYearProgress", false)
+
+  // Declined invitations stay in by default: you may still want to see what
+  // you said no to, while the settings page can hide them explicitly.
+  readonly property bool hideDeclined: setting("hideDeclined", false)
+
+  // Hiding happens here rather than in the sync, so toggling a calendar back
+  // on is instant instead of waiting for the next fetch. The sync keeps
+  // pulling everything.
+  //
+  // Held as local state rather than read straight off `settings` on every
+  // access. Persisting round-trips through shell.json and comes back
+  // asynchronously, so a binding would still be serving the old value when a
+  // second click arrives, and the first toggle would be silently undone.
+  property var hiddenCalendars: []
+  readonly property var knownCalendars: Model.calendarsInDocument(eventDoc)
+
+  function adoptSettings() {
+    var stored = setting("hiddenCalendars", [])
+    root.hiddenCalendars = Array.isArray(stored) ? stored.slice() : []
+  }
+
+  function toggleCalendar(calendarId) {
+    root.hiddenCalendars = Model.toggleHiddenCalendar(root.hiddenCalendars, calendarId)
+    persistSettings({ hiddenCalendars: root.hiddenCalendars })
+  }
+
+  function toggleYearProgress() {
+    persistSettings({ showYearProgress: !root.showYearProgress })
+  }
+
+  function setAnnounceLeadMinutes(minutes) {
+    persistSettings({ announceLeadMinutes: minutes })
+  }
+
+  property bool settingsOpen: false
+
+  function toggleHideDeclined() {
+    persistSettings({ hideDeclined: !root.hideDeclined })
+  }
+
+  // Qt.openUrlExternally rather than the shell helper on purpose. That helper
+  // runs `bash -lc`, and a meeting link is supplied by whoever sent the
+  // invitation, so putting it through a shell would be a command injection.
+  // Model.safeUrl also refuses anything that is not plain https.
+  function openExternally(url) {
+    if (!url) return
+    Qt.openUrlExternally(url)
+    root.close()
+  }
+
+  function openMeeting(event) {
+    root.openExternally(Model.meetingUrlFor(event))
+  }
+
+  onHiddenCalendarsChanged: root.rebuildIndex()
+  onHideDeclinedChanged: root.rebuildIndex()
+  onSettingsChanged: root.adoptSettings()
+  Component.onCompleted: {
+    root.adoptSettings()
+    root.exportEvents()
+  }
 
 
   // Guarded so the widget renders before the bar is injected (the bar-widget
   // contract instantiates it bare).
   readonly property color contentForeground: bar ? bar.foreground : Color.foreground
   readonly property string contentFontFamily: bar ? bar.fontFamily : Style.font.family
-  readonly property var notificationService: bar && bar.shell
-    ? bar.shell.firstPartyServiceFor("omarchy.notifications")
-    : null
 
   readonly property int cellWidth: Style.space(52)
   readonly property int cellHeight: Style.space(34)
@@ -86,6 +224,7 @@ Panel {
 
   function open() {
     refresh()
+    root.exportEvents()
     notificationHistory.refresh()
     root.controller.show()
     // Set after showing, not before: showing hands the popout coordinator
@@ -224,10 +363,59 @@ Panel {
     return String(Qt.locale().dayName(weekday, Locale.ShortFormat)).replace(/\.$/, "").toUpperCase()
   }
 
+  // watchChanges is the point of this whole widget. The sync rewrites the
+  // file every few minutes and the popup has to follow it without the shell
+  // being restarted. There is deliberately no "already loaded" guard here:
+  // one exists upstream in a similar plugin and it is exactly what made an
+  // externally written file impossible to pick up.
+  FileView {
+    id: eventsFile
+    path: (Quickshell.env("HOME") || "") + "/.local/state/omarchy/calendar-events.json"
+    watchChanges: true
+    printErrors: false
+    onLoaded: root.applyEvents(text())
+    onLoadFailed: root.applyEvents("")
+    onFileChanged: reload()
+  }
+
+  function exportEvents() {
+    if (caldirExporter.running) {
+      root.exportPending = true
+      return
+    }
+    root.exportError = ""
+    caldirExporter.running = true
+  }
+
+  Process {
+    id: caldirExporter
+    command: [root.exporterPath]
+    running: false
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.exportError = text.trim()
+    }
+    onExited: function(exitCode) {
+      if (exitCode === 0) root.exportError = ""
+      if (!root.exportPending) return
+      root.exportPending = false
+      Qt.callLater(root.exportEvents)
+    }
+  }
+
+  Timer {
+    interval: root.syncIntervalSeconds * 1000
+    running: true
+    repeat: true
+    onTriggered: root.exportEvents()
+  }
+
   SystemClock {
     id: clock
     precision: SystemClock.Minutes
     onDateChanged: {
+      // Always, so the countdown moves even when the day has not.
+      root.nowTick = clock.date
       if (Model.keyForDate(clock.date) === String(root.todayKey)) return
       var followToday = root.viewingCurrentMonth
       root.today = clock.date
@@ -297,6 +485,18 @@ Panel {
             width: parent.width
             height: heroRow.height
 
+            // Sits in the hero's right margin rather than in the row itself,
+            // so turning it on and off never shifts the date off centre.
+            PanelActionButton {
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              iconText: root.settingsOpen ? "󰅖" : "󰒓"
+              tooltipText: root.settingsOpen ? "Back to calendar" : "Settings"
+              foreground: root.contentForeground
+              fontFamily: root.contentFontFamily
+              onClicked: root.settingsOpen = !root.settingsOpen
+            }
+
             Row {
               id: heroRow
               anchors.horizontalCenter: parent.horizontalCenter
@@ -354,6 +554,7 @@ Panel {
           //      a plain hairline said nothing, and whole days done
           //      over days in the year says the same thing louder.
           Item {
+            visible: !root.settingsOpen
             width: parent.width
             height: yearBlock.y + yearBlock.height
 
@@ -365,8 +566,49 @@ Panel {
               height: Math.max(yearLabel.implicitHeight, Style.space(10))
 
               TapHandler {
-                enabled: !root.editingLife
+                enabled: root.showYearProgress && !root.editingLife
                 onDoubleTapped: root.startEditingLife()
+              }
+
+              // ---- What is coming up, in the slot the year bar used to own.
+              //      Reads as a sentence rather than a gauge, because the
+              //      answer people want here is "what next", not "how far in".
+              Row {
+                visible: !root.showYearProgress
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: Style.space(4)
+
+                Rectangle {
+                  anchors.verticalCenter: parent.verticalCenter
+                  visible: root.upcomingEvent !== null
+                  width: Style.space(4)
+                  height: width
+                  radius: width / 2
+                  color: root.upcomingEvent ? root.upcomingEvent.color : "transparent"
+                }
+
+                Text {
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: parent.width - Style.space(70)
+                  text: root.upcomingEvent ? root.upcomingEvent.title : qsTr("Nothing else today")
+                  textFormat: Text.PlainText
+                  color: root.upcomingEvent
+                    ? root.contentForeground
+                    : Qt.darker(root.contentForeground, 1.9)
+                  font.family: root.contentFontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  elide: Text.ElideRight
+                }
+
+                Text {
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: root.upcomingCountdown
+                  color: Qt.darker(root.contentForeground, 1.4)
+                  font.family: root.contentFontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
               }
 
               Row {
@@ -422,7 +664,7 @@ Panel {
 
               Text {
                 id: yearLabel
-                visible: !root.editingLife
+                visible: root.showYearProgress && !root.editingLife
                 anchors.left: parent.left
                 anchors.verticalCenter: parent.verticalCenter
                 text: root.today.getFullYear()
@@ -434,7 +676,7 @@ Panel {
 
               Text {
                 id: yearPercent
-                visible: !root.editingLife
+                visible: root.showYearProgress && !root.editingLife
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
                 text: root.yearDonePercent + "%"
@@ -445,7 +687,7 @@ Panel {
 
               Rectangle {
                 id: yearTrack
-                visible: !root.editingLife
+                visible: root.showYearProgress && !root.editingLife
                 anchors.left: yearLabel.right
                 anchors.right: yearPercent.left
                 anchors.leftMargin: Style.space(12)
@@ -471,7 +713,7 @@ Panel {
           //      given an age; the same rail as the year above it, measured
           //      against a nominal lifetime.
           Item {
-            visible: root.birthYear > 0
+            visible: !root.settingsOpen && root.showYearProgress && root.birthYear > 0
             width: parent.width
             height: visible ? lifeBlock.height : 0
 
@@ -545,6 +787,7 @@ Panel {
           //      the seven day columns. Always six rows, so the popup is
           //      exactly as tall in February as it is in August.
           Item {
+            visible: !root.settingsOpen
             width: parent.width
             height: gridColumn.y + gridColumn.height
 
@@ -659,19 +902,30 @@ Panel {
                     model: modelData.days
 
                     Rectangle {
+                      id: dayCell
                       required property var modelData
+
+                      readonly property bool selected: modelData.key === root.selectedDayKey
 
                       width: root.cellWidth
                       height: root.cellHeight
                       radius: Style.cornerRadius
                       // Today is outlined, not filled: a lit-up block shouts
-                      // over a grid this quiet.
-                      color: "transparent"
+                      // over a grid this quiet. The selected day gets a faint
+                      // wash instead, so the two marks never compete.
+                      color: dayCell.selected
+                        ? Qt.rgba(root.contentForeground.r, root.contentForeground.g, root.contentForeground.b, 0.10)
+                        : "transparent"
                       border.width: modelData.today ? Style.spacing.hairline : 0
                       border.color: Style.normalBorderFor(root.contentForeground, Color.accent)
 
                       Text {
+                        id: dayNumber
                         anchors.centerIn: parent
+                        // Lifted just enough to clear the dots, and only on
+                        // days that have any, so an empty month does not
+                        // shift under the cursor.
+                        anchors.verticalCenterOffset: modelData.hasEvent ? -Style.space(3) : 0
                         text: modelData.day
                         color: modelData.inMonth
                           ? (modelData.weekend ? Qt.darker(root.contentForeground, 1.45) : root.contentForeground)
@@ -679,6 +933,31 @@ Panel {
                         font.family: root.contentFontFamily
                         font.pixelSize: Style.font.body
                         font.bold: modelData.today
+                      }
+
+                      Row {
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        anchors.top: dayNumber.bottom
+                        anchors.topMargin: Style.space(1)
+                        spacing: Style.space(1)
+                        visible: dayCell.modelData.hasEvent
+
+                        Repeater {
+                          model: dayCell.modelData.dots
+
+                          Rectangle {
+                            required property var modelData
+                            width: Style.space(3)
+                            height: width
+                            radius: width / 2
+                            color: modelData
+                            opacity: dayCell.modelData.inMonth ? 0.9 : 0.4
+                          }
+                        }
+                      }
+
+                      TapHandler {
+                        onTapped: root.selectDay(dayCell.modelData.key)
                       }
                     }
                   }
@@ -705,6 +984,7 @@ Panel {
           //      The label is centered and fixed-width, so it holds still
           //      from "MAY" to "SEPTEMBER".
           Item {
+            visible: !root.settingsOpen
             width: parent.width
             height: monthNav.height
 
@@ -754,8 +1034,207 @@ Panel {
               }
             }
           }
+
+          // ---- The selected day's agenda. Headed by its own date, because
+          //      the selection survives stepping to another month and an
+          //      undated list would then be a quiet lie.
+          Column {
+            visible: !root.settingsOpen
+            width: gridColumn.width
+            anchors.horizontalCenter: parent.horizontalCenter
+            spacing: Style.space(4)
+
+            Text {
+              width: parent.width
+              text: Qt.formatDate(root.selectedDate, "dddd d MMMM").toUpperCase()
+              color: Qt.darker(root.contentForeground, 1.4)
+              font.family: root.contentFontFamily
+              font.pixelSize: Style.font.caption
+              font.letterSpacing: 1
+              font.bold: true
+            }
+
+            Repeater {
+              model: root.selectedEvents
+
+              // The hover wash lives on this wrapper, never inside the Row. A
+              // Row lays out every visible child, so an anchored background
+              // added as a Row child fights the layout and ejects the content.
+              Rectangle {
+                id: eventRow
+                required property var modelData
+
+                readonly property string meetingUrl: Model.meetingUrlFor(modelData)
+                readonly property bool declined: Model.isDeclined(modelData)
+                // Only around the actual time. A Join button on next week's
+                // meeting is noise that dilutes the one that matters.
+                readonly property bool joinable: Model.isJoinableNow(modelData, root.nowTick.getTime(), root.todayKey)
+
+                width: gridColumn.width
+                height: eventBody.height + Style.space(2)
+                radius: Style.cornerRadius
+                color: "transparent"
+
+                Rectangle {
+                  id: joinButton
+                  visible: eventRow.joinable
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: joinLabel.implicitWidth + Style.space(8)
+                  height: joinLabel.implicitHeight + Style.space(3)
+                  radius: height / 2
+                  color: joinHover.hovered
+                    ? Style.selectedStateColor(root.contentForeground, Color.accent)
+                    : "transparent"
+                  border.width: Style.spacing.hairline
+                  border.color: joinHover.hovered
+                    ? "transparent"
+                    : Qt.darker(root.contentForeground, 2.0)
+
+                  HoverHandler {
+                    id: joinHover
+                    cursorShape: Qt.PointingHandCursor
+                  }
+
+                  // Its own handler, declared on the button, so the grab
+                  // happens here and the row's opener does not also fire.
+                  TapHandler {
+                    gesturePolicy: TapHandler.ReleaseWithinBounds
+                    onTapped: root.openMeeting(eventRow.modelData)
+                  }
+
+                  Text {
+                    id: joinLabel
+                    anchors.centerIn: parent
+                    text: qsTr("Join")
+                    color: joinHover.hovered ? Color.background : Qt.darker(root.contentForeground, 1.4)
+                    font.family: root.contentFontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                }
+
+                Row {
+                  id: eventBody
+                  anchors.left: parent.left
+                  anchors.right: eventRow.joinable ? joinButton.left : parent.right
+                  anchors.rightMargin: eventRow.joinable ? Style.space(3) : 0
+                  anchors.verticalCenter: parent.verticalCenter
+                  spacing: Style.space(4)
+
+                Rectangle {
+                  width: Style.space(2)
+                  height: eventLines.height
+                  radius: width / 2
+                  color: eventRow.declined
+                    ? Qt.darker(eventRow.modelData.color, 2.2)
+                    : eventRow.modelData.color
+                }
+
+                Text {
+                  width: Style.space(58)
+                  text: eventRow.modelData.allDay
+                    ? qsTr("All day")
+                    : eventRow.modelData.continuation
+                      ? qsTr("Ongoing")
+                      : Qt.formatDateTime(new Date(eventRow.modelData.start), "HH:mm")
+                  color: Qt.darker(root.contentForeground, eventRow.declined ? 2.2 : 1.5)
+                  font.family: root.contentFontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  font.strikeout: eventRow.declined
+                }
+
+                Column {
+                  id: eventLines
+                  width: eventBody.width - Style.space(68)
+                  spacing: Style.space(1)
+
+                  Text {
+                    width: parent.width
+                    text: eventRow.modelData.title
+                    textFormat: Text.PlainText
+                    color: eventRow.declined
+                      ? Qt.darker(root.contentForeground, 2.0)
+                      : root.contentForeground
+                    font.family: root.contentFontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    font.strikeout: eventRow.declined
+                    elide: Text.ElideRight
+                  }
+
+                  Text {
+                    width: parent.width
+                    visible: text !== ""
+                    text: eventRow.declined ? qsTr("Declined") : eventRow.modelData.location
+                    textFormat: Text.PlainText
+                    color: Qt.darker(root.contentForeground, 1.9)
+                    font.family: root.contentFontFamily
+                    font.pixelSize: Style.font.caption
+                    elide: Text.ElideRight
+                  }
+                }
+                }
+              }
+            }
+
+            // An empty day and a sync that never ran look identical unless
+            // we say which one it is.
+            Text {
+              id: emptyState
+              width: parent.width
+              visible: root.selectedEvents.length === 0
+              color: Qt.darker(root.contentForeground, 1.9)
+              font.family: root.contentFontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+              textFormat: Text.PlainText
+
+              text: root.exportError !== ""
+                ? qsTr("Calendar export failed: %1").arg(root.exportError)
+                : root.syncState === "missing"
+                  ? qsTr("No Caldir events found. Install the caldir CLI and connect a calendar in renCal.")
+                  : root.syncState === "version"
+                    ? qsTr("Events file was written by a newer version. Update the plugin.")
+                    : root.syncState === "stale"
+                      ? qsTr("Calendar data is stale. Open renCal or run caldir sync.")
+                      : qsTr("Nothing scheduled")
+            }
+
+          }
+
+          // ---- Settings, shown in place of the grid. Everything it changes
+          //      is owned by this panel and persisted to shell.json here, so
+          //      the view stays a pure read-and-emit surface.
+          SettingsView {
+            visible: root.settingsOpen
+            width: gridColumn.width
+            anchors.horizontalCenter: parent.horizontalCenter
+
+            foreground: root.contentForeground
+            fontFamily: root.contentFontFamily
+
+            calendars: root.knownCalendars
+            hiddenCalendars: root.hiddenCalendars
+            showYearProgress: root.showYearProgress
+            hideDeclined: root.hideDeclined
+            weekStartsMonday: root.weekStart === 1
+            announceLeadMinutes: root.setting("announceLeadMinutes", 15)
+
+            syncState: root.syncState
+            exportError: root.exportError
+            eventCount: root.eventDoc && root.eventDoc.events ? root.eventDoc.events.length : 0
+            sourceLabel: root.eventDoc ? String(root.eventDoc.source || "") : ""
+            syncedAt: root.eventDoc && root.eventDoc.syncedAt
+              ? Qt.formatDateTime(new Date(root.eventDoc.syncedAt), "d MMM HH:mm")
+              : ""
+
+            onCalendarToggled: function(calendarId) { root.toggleCalendar(calendarId) }
+            onYearProgressToggled: root.toggleYearProgress()
+            onHideDeclinedToggled: root.toggleHideDeclined()
+            onWeekStartToggled: root.toggleWeekStart()
+            onLeadMinutesPicked: function(minutes) { root.setAnnounceLeadMinutes(minutes) }
+          }
         }
-      }
+        }
 
         Rectangle {
           Layout.fillHeight: true
@@ -770,7 +1249,9 @@ Panel {
           Layout.fillHeight: true
           Layout.preferredWidth: Style.space(380)
           Layout.minimumWidth: Style.space(220)
-          notificationService: root.notificationService
+          notificationService: root.bar && root.bar.shell
+            ? root.bar.shell.firstPartyServiceFor("omarchy.notifications")
+            : null
           foreground: root.contentForeground
           fontFamily: root.contentFontFamily
           onNotificationActivated: root.close()

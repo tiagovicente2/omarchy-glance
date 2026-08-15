@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+"""Set Omarchy's bar center anchor without replacing any other shell settings."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import stat
+import tempfile
+from pathlib import Path
+
+
+def default_shell_config() -> Path:
+    config_home = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(config_home).expanduser() if config_home else Path("~/.config").expanduser()
+    return base / "omarchy" / "shell.json"
+
+
+def update_anchor(path: Path) -> bool:
+    try:
+        original = path.read_text(encoding="utf-8")
+        document = json.loads(original)
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"cannot read valid shell config {path}: {error}") from error
+    if not isinstance(document, dict):
+        raise RuntimeError(f"shell config root is not an object: {path}")
+
+    bar = document.get("bar")
+    if bar is None:
+        bar = {}
+        document["bar"] = bar
+    if not isinstance(bar, dict):
+        raise RuntimeError(f"shell config bar is not an object: {path}")
+    if bar.get("centerAnchor") == "omarchy-glance":
+        return False
+    bar["centerAnchor"] = "omarchy-glance"
+
+    mode = stat.S_IMODE(path.stat().st_mode)
+    payload = json.dumps(document, ensure_ascii=False, indent=2) + "\n"
+    fd, temporary = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+    return True
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=Path, default=default_shell_config())
+    args = parser.parse_args()
+    try:
+        changed = update_anchor(args.config.expanduser())
+    except RuntimeError as error:
+        parser.error(str(error))
+    print("centerAnchor set to omarchy-glance" if changed else "centerAnchor already omarchy-glance")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

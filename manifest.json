@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "id": "omarchy-glance",
+  "name": "Omarchy Glance",
+  "version": "1.0.0",
+  "author": "Tiago Vicente",
+  "description": "Centered calendar with interactive recent notification history",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Omarchy Glance",
+    "description": "Centered calendar with interactive recent notification history",
+    "category": "Time",
+    "allowMultiple": false
+  },
+  "omarchy": {
+    "clonedFrom": "omarchy.clock"
+  },
+  "license": "MIT"
+}

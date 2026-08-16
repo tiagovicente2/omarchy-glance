@@ -196,7 +196,7 @@ Item {
 
   function moveCursor(delta) {
     if (historyModel.count === 0) return
-    activateCursor()
+    cursorActive = true
     var from = cursorIndex >= 0 && cursorIndex < historyModel.count
       ? cursorIndex
       : (delta > 0 ? -1 : historyModel.count)

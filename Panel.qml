@@ -12,7 +12,10 @@ import "Model.js" as Model
 //
 // The grid is a read-out rather than a picker: today is the only marked
 // day, and the only thing that moves is which month is on screen —
-// chevrons, the scroll wheel, and the arrow keys all step it.
+// chevrons, the scroll wheel, and the left/right arrow keys step it.
+// The up/down arrow keys walk the notification list on the right instead
+// (Enter opens the selected notification); today is one 't' away, or one
+// Enter while no notification is selected.
 //
 // BarWidget.qml owns the bar label and hands this panel the button to
 // anchor against.
@@ -439,15 +442,14 @@ Panel {
       anchors.fill: parent
       blocked: root.editingLife
       onMoveRequested: function(dx, dy) {
-        if (dy !== 0 && notificationHistory.active) {
+        if (dy !== 0) {
           notificationHistory.moveCursor(dy)
           return
         }
         if (dx !== 0) root.moveMonth(dx)
-        if (dy !== 0) root.moveYear(dy)
       }
       onActivateRequested: function() {
-        if (notificationHistory.active && notificationHistory.handleActivate()) return
+        if (notificationHistory.handleActivate()) return
         root.goToToday()
       }
       onCloseRequested: root.close()

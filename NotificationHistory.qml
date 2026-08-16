@@ -20,10 +20,10 @@ Item {
 
   signal notificationActivated()
 
-  // The panel routes Up/Down and Enter here only while `active`, which the
-  // pointer turns on by hovering the column. Leaving hands the arrows back to
-  // the calendar immediately, so the two halves never fight over one key set.
-  property bool active: false
+  // Arrow keys always navigate this list while the panel is open — no hover
+  // required. Left/Right still drive the calendar on the other side; today's
+  // grid can always be reached with the 't' key or a click, and the '[' ']'
+  // '{' '}' text keys keep stepping months and years.
   property bool cursorActive: false
   property int cursorIndex: -1
 
@@ -36,7 +36,6 @@ Item {
 
   function refresh() {
     discardPendingResults = false
-    root.active = false
     root.deactivateCursor()
     reload()
   }
@@ -101,8 +100,6 @@ Item {
     if (!entry) return false
     if (String(entry.exec || "") !== "") return true
     return isFocusableApp(entry.app)
-      && notificationService
-      && typeof notificationService.focusApp === "function"
   }
 
   function dismissHistoryEntry(index) {
@@ -124,13 +121,52 @@ Item {
     var command = String(entry.exec || "")
     if (command !== "") {
       Util.execDetached(command)
-    } else if (notificationService && typeof notificationService.focusApp === "function") {
-      notificationService.focusApp(entry)
     } else {
-      return
+      launchApp(entry.app)
     }
     dismissHistoryEntry(index)
     notificationActivated()
+  }
+
+  // Launch-or-focus a notification's sender. The notification service's own
+  // focusApp only focuses a window that already exists, which makes clicking
+  // a history entry for a closed app do nothing. Resolve the sender's desktop
+  // file instead: focus a matching window when one is open, otherwise launch
+  // the app (uwsm-app runs the desktop entry through the session manager, the
+  // same path omarchy's own launch-or-focus helpers use).
+  function launchApp(appName) {
+    if (launchProc.running) return
+    launchProc.command = ["bash", "-c", root.launchOrFocusScript, "--", String(appName || "")]
+    launchProc.running = true
+  }
+
+  readonly property string launchOrFocusScript:
+    "app=$1\n" +
+    "desktop=\n" +
+    "for dir in \"$HOME/.local/share/applications\" \"$HOME/.nix-profile/share/applications\" \"/usr/local/share/applications\" \"/usr/share/applications\"; do\n" +
+    "  for file in \"$dir\"/*.desktop; do\n" +
+    "    [[ -f $file ]] || continue\n" +
+    "    if [[ $(basename \"$file\" .desktop) == \"$app\" ]] || grep -m1 -qi \"^Name=$app$\" \"$file\"; then desktop=\"$file\"; break 2; fi\n" +
+    "  done\n" +
+    "done\n" +
+    "if [[ -z $desktop ]]; then\n" +
+    "  omarchy-hyprland-focus-app \"$app\"\n" +
+    "  exit 0\n" +
+    "fi\n" +
+    "id=$(basename \"$desktop\" .desktop)\n" +
+    "wmclass=$(sed -n 's/^StartupWMClass=//p' \"$desktop\" | head -n1)\n" +
+    "pattern=$(printf '%s|%s|%s' \"$id\" \"$wmclass\" \"$app\")\n" +
+    "address=$(hyprctl clients -j 2>/dev/null | jq -r --arg p \"$pattern\" 'first(.[] | select((.class // \"\") | test($p; \"i\"))).address // empty')\n" +
+    "if [[ -n $address ]]; then\n" +
+    "  hyprctl dispatch \"hl.dsp.focus({ window = \\\"address:$address\\\" })\" >/dev/null 2>&1 || \\\n" +
+    "    hyprctl dispatch focuswindow \"address:$address\" >/dev/null\n" +
+    "else\n" +
+    "  setsid uwsm-app -- \"$id.desktop\" >/dev/null 2>&1 &\n" +
+    "fi"
+
+  Process {
+    id: launchProc
+    running: false
   }
 
   // ---- Keyboard cursor. Selection only ever lands on an openable entry, so
@@ -170,9 +206,12 @@ Item {
   }
 
   // True when the cursor opened something; false when the panel should fall
-  // back to its own default (focussing today) instead.
+  // back to its own default (focussing today) instead. Enter engages the
+  // cursor first, so a bare Enter opens the most recent openable
+  // notification without any arrowing.
   function handleActivate() {
-    if (cursorIndex < 0 || !canOpenAt(cursorIndex)) return false
+    activateCursor()
+    if (cursorIndex < 0) return false
     openCursor()
     return true
   }
@@ -351,7 +390,7 @@ Item {
           enabled: card.opens
           hoverEnabled: true
           cursorShape: card.opens ? Qt.PointingHandCursor : Qt.ArrowCursor
-          onEntered: { root.active = true; root.selectCursor(card.index) }
+          onEntered: root.selectCursor(card.index)
           onClicked: root.openNotification(card.index)
         }
 
@@ -483,17 +522,5 @@ Item {
         }
       }
     }
-  }
-
-  // Which half of the panel owns the arrow keys is the pointer's call: this
-  // area turns the list keyboard-active on hover and hands the arrows back
-  // to the calendar the moment the cursor leaves. NoButton so card clicks
-  // and wheel scrolling keep working underneath.
-  MouseArea {
-    anchors.fill: parent
-    acceptedButtons: Qt.NoButton
-    hoverEnabled: true
-    onEntered: root.active = true
-    onExited: { root.active = false; root.deactivateCursor() }
   }
 }

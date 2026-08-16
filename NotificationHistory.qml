@@ -20,6 +20,13 @@ Item {
 
   signal notificationActivated()
 
+  // The panel routes Up/Down and Enter here only while `active`, which the
+  // pointer turns on by hovering the column. Leaving hands the arrows back to
+  // the calendar immediately, so the two halves never fight over one key set.
+  property bool active: false
+  property bool cursorActive: false
+  property int cursorIndex: -1
+
   ListModel { id: historyModel }
 
   // Clearing history is asynchronous in the first-party service. Ignore any
@@ -29,6 +36,8 @@ Item {
 
   function refresh() {
     discardPendingResults = false
+    root.active = false
+    root.deactivateCursor()
     reload()
   }
 
@@ -71,6 +80,7 @@ Item {
         console.warn("clock notifications: invalid history entry:", error)
       }
     }
+    root.clampCursor()
   }
 
   function dismissAll() {
@@ -79,6 +89,7 @@ Item {
     if (notificationService && typeof notificationService.clearHistory === "function")
       notificationService.clearHistory()
     historyModel.clear()
+    root.deactivateCursor()
   }
 
   function isFocusableApp(app) {
@@ -102,6 +113,7 @@ Item {
       "rm -f -- \"$1/$3.json\" \"$2/$3\"-*",
       "--", historyDir, imagesDir, stem])
     historyModel.remove(index)
+    root.clampCursor()
   }
 
   function openNotification(index) {
@@ -119,6 +131,82 @@ Item {
     }
     dismissHistoryEntry(index)
     notificationActivated()
+  }
+
+  // ---- Keyboard cursor. Selection only ever lands on an openable entry, so
+  //      Enter always has something to act on, and the pointer places the
+  //      cursor on whatever card it is hovering — Enter opens exactly what
+  //      is pointed at.
+
+  function activateCursor() {
+    if (historyModel.count === 0) return
+    cursorActive = true
+    clampCursor()
+    if (cursorIndex < 0) cursorIndex = nextOpenable(-1, 1)
+    positionCursor()
+  }
+
+  function selectCursor(index) {
+    if (!canOpenAt(index)) return
+    cursorActive = true
+    cursorIndex = index
+    positionCursor()
+  }
+
+  function deactivateCursor() {
+    cursorActive = false
+    cursorIndex = -1
+  }
+
+  function moveCursor(delta) {
+    if (historyModel.count === 0) return
+    activateCursor()
+    var from = cursorIndex >= 0 && cursorIndex < historyModel.count
+      ? cursorIndex
+      : (delta > 0 ? -1 : historyModel.count)
+    var next = nextOpenable(from, delta)
+    if (next >= 0) cursorIndex = next
+    positionCursor()
+  }
+
+  // True when the cursor opened something; false when the panel should fall
+  // back to its own default (focussing today) instead.
+  function handleActivate() {
+    if (cursorIndex < 0 || !canOpenAt(cursorIndex)) return false
+    openCursor()
+    return true
+  }
+
+  function openCursor() {
+    var index = cursorIndex
+    deactivateCursor()
+    openNotification(index)
+  }
+
+  function nextOpenable(from, step) {
+    var stride = step > 0 ? 1 : -1
+    for (var i = from + stride; i >= 0 && i < historyModel.count; i += stride)
+      if (canOpenAt(i)) return i
+    return -1
+  }
+
+  function canOpenAt(index) {
+    return index >= 0 && index < historyModel.count && canOpen(historyModel.get(index))
+  }
+
+  function clampCursor() {
+    if (historyModel.count === 0 || !cursorActive) {
+      cursorIndex = -1
+      return
+    }
+    if (canOpenAt(cursorIndex)) return
+    cursorIndex = nextOpenable(-1, 1)
+    if (cursorIndex < 0) cursorIndex = nextOpenable(historyModel.count, -1)
+  }
+
+  function positionCursor() {
+    if (cursorActive && cursorIndex >= 0 && cursorIndex < historyModel.count)
+      notificationList.positionViewAtIndex(cursorIndex, ListView.Contain)
   }
 
   function iconSource(value) {
@@ -243,14 +331,19 @@ Item {
         required property int originalId
 
         readonly property bool opens: root.canOpen(card)
+        readonly property bool selected: root.cursorActive && card.index === root.cursorIndex
         readonly property string bodyText: root.readableBody(body)
         readonly property string resolvedIcon: root.iconSource(image !== "" ? image : appIcon)
 
         width: notificationList.width
         implicitHeight: cardContent.implicitHeight + Style.space(20)
         radius: root.cardRadius
-        color: opens && cardMouse.containsMouse ? root.hoverColor : "transparent"
-        borderSpec: Border.flat(root.borderColor, Style.normalBorderWidth)
+        color: card.selected
+          ? Style.selectedFillFor(root.foreground, Color.accent)
+          : (opens && cardMouse.containsMouse ? root.hoverColor : "transparent")
+        borderSpec: Border.flat(card.selected
+          ? Style.selectedBorderFor(root.foreground, Color.accent)
+          : root.borderColor, Style.normalBorderWidth)
 
         MouseArea {
           id: cardMouse
@@ -258,6 +351,7 @@ Item {
           enabled: card.opens
           hoverEnabled: true
           cursorShape: card.opens ? Qt.PointingHandCursor : Qt.ArrowCursor
+          onEntered: { root.active = true; root.selectCursor(card.index) }
           onClicked: root.openNotification(card.index)
         }
 
@@ -389,5 +483,17 @@ Item {
         }
       }
     }
+  }
+
+  // Which half of the panel owns the arrow keys is the pointer's call: this
+  // area turns the list keyboard-active on hover and hands the arrows back
+  // to the calendar the moment the cursor leaves. NoButton so card clicks
+  // and wheel scrolling keep working underneath.
+  MouseArea {
+    anchors.fill: parent
+    acceptedButtons: Qt.NoButton
+    hoverEnabled: true
+    onEntered: root.active = true
+    onExited: { root.active = false; root.deactivateCursor() }
   }
 }

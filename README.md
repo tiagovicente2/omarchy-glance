@@ -9,7 +9,7 @@ A centered Omarchy clock panel that combines a calendar, a renCal/Caldir agenda,
 - Announces the next event beside the clock near its start time
 - Opens allowlisted Google Meet, Microsoft Teams, and Zoom links
 - Shows the 10 most recent archived notifications on the right
-- Opens stored notification actions or focuses the originating app
+- Opens stored notification actions or focuses/launches the originating app
 - Dismisses notifications after activation and supports **Dismiss all**
 
 ## Calendar architecture

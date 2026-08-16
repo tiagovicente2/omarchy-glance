@@ -439,10 +439,17 @@ Panel {
       anchors.fill: parent
       blocked: root.editingLife
       onMoveRequested: function(dx, dy) {
+        if (dy !== 0 && notificationHistory.active) {
+          notificationHistory.moveCursor(dy)
+          return
+        }
         if (dx !== 0) root.moveMonth(dx)
         if (dy !== 0) root.moveYear(dy)
       }
-      onActivateRequested: root.goToToday()
+      onActivateRequested: function() {
+        if (notificationHistory.active && notificationHistory.handleActivate()) return
+        root.goToToday()
+      }
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(t) {

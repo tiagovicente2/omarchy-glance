@@ -85,8 +85,12 @@ Item {
   function dismissAll() {
     discardPendingResults = true
     reloadPending = false
-    if (notificationService && typeof notificationService.clearHistory === "function")
+    if (notificationService && typeof notificationService.clearHistory === "function") {
       notificationService.clearHistory()
+    }
+    Quickshell.execDetached(["bash", "-c",
+      "rm -f -- \"$1\"/*.json \"$2\"/* 2>/dev/null",
+      "--", historyDir, imagesDir])
     historyModel.clear()
     root.deactivateCursor()
   }
@@ -402,11 +406,47 @@ Item {
         MouseArea {
           id: cardMouse
           anchors.fill: parent
-          enabled: card.opens
+          acceptedButtons: Qt.LeftButton | Qt.RightButton
+          enabled: true
           hoverEnabled: true
           cursorShape: card.opens ? Qt.PointingHandCursor : Qt.ArrowCursor
           onEntered: root.selectCursor(card.index)
-          onClicked: root.openNotification(card.index)
+          onClicked: function(mouse) {
+            if (mouse.button === Qt.RightButton) {
+              root.dismissHistoryEntry(card.index)
+            } else if (card.opens) {
+              root.openNotification(card.index)
+            }
+          }
+        }
+
+        Item {
+          anchors.top: parent.top
+          anchors.right: parent.right
+          anchors.topMargin: Style.space(4)
+          anchors.rightMargin: Style.space(6)
+          width: Style.space(18)
+          height: Style.space(18)
+          z: 2
+          opacity: cardMouse.containsMouse || closeArea.containsMouse ? 1 : 0
+          visible: opacity > 0
+
+          Behavior on opacity { NumberAnimation { duration: 100 } }
+
+          Text {
+            anchors.centerIn: parent
+            text: "✕"
+            color: closeArea.containsMouse ? root.foreground : root.dimForeground
+            font.pixelSize: Math.round(Style.font.caption * 1.1)
+          }
+
+          MouseArea {
+            id: closeArea
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: root.dismissHistoryEntry(card.index)
+          }
         }
 
         RowLayout {

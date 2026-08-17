@@ -1258,9 +1258,17 @@ Panel {
           Layout.fillHeight: true
           Layout.preferredWidth: Style.space(380)
           Layout.minimumWidth: Style.space(220)
-          notificationService: root.bar && root.bar.shell
-            ? root.bar.shell.firstPartyServiceFor("omarchy.notifications")
-            : null
+          notificationService: {
+            if (!root.bar || !root.bar.shell) return null
+            var sh = root.bar.shell
+            var svcId = (sh.pluginRegistry && typeof sh.pluginRegistry.resolveEnabledId === "function")
+              ? sh.pluginRegistry.resolveEnabledId("omarchy.notifications")
+              : "omarchy.notifications"
+            return (sh.serviceFor && sh.serviceFor(svcId))
+              || (sh.firstPartyServiceFor && sh.firstPartyServiceFor("omarchy.notifications"))
+              || (sh.serviceFor && sh.serviceFor("omarchy.notifications"))
+              || null
+          }
           foreground: root.contentForeground
           fontFamily: root.contentFontFamily
           onNotificationActivated: root.close()

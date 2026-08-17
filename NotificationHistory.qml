@@ -109,15 +109,9 @@ Item {
   function dismissHistoryEntry(index) {
     if (index < 0 || index >= historyModel.count) return
     var entry = historyModel.get(index)
-    var originalId = Number(entry.originalId || entry.id || 0)
-
-    if (notificationService && typeof notificationService.dismissNotification === "function") {
-      notificationService.dismissNotification(originalId)
-    }
-
     var stem = String(entry.timestamp || 0) + "-" + String(entry.originalId || 0)
     Quickshell.execDetached(["bash", "-c",
-      "rm -f -- \"$1/$3.json\" \"$2/$3\"-*",
+      "rm -f -- \"$1/$3.json\" \"$2/$3\"-* 2>/dev/null",
       "--", historyDir, imagesDir, stem])
     historyModel.remove(index)
     root.clampCursor()
@@ -128,20 +122,11 @@ Item {
     var entry = historyModel.get(index)
     if (!canOpen(entry)) return
 
-    var originalId = Number(entry.originalId || entry.id || 0)
-    var invoked = false
-
-    if (notificationService && typeof notificationService.invokeNotificationAction === "function") {
-      invoked = notificationService.invokeNotificationAction(originalId, "default")
-    }
-
-    if (!invoked) {
-      var command = String(entry.exec || "")
-      if (command !== "") {
-        Util.execDetached(command)
-      } else {
-        launchApp(entry.app)
-      }
+    var command = String(entry.exec || "")
+    if (command !== "") {
+      Util.execDetached(command)
+    } else {
+      launchApp(entry.app)
     }
     dismissHistoryEntry(index)
     notificationActivated()

@@ -67,6 +67,7 @@ caldir --json events --from "$(date -I)" --to "$(date -I -d '+30 days')" | jq
 ```bash
 omarchy plugin add https://github.com/tiagovicente2/omarchy-glance.git --enable
 ~/.config/omarchy/plugins/omarchy-glance/setup/center-anchor
+~/.config/omarchy/plugins/omarchy-glance/setup/sync-timer
 jq -e '.bar.centerAnchor == "omarchy-glance"' ~/.config/omarchy/shell.json
 ```
 

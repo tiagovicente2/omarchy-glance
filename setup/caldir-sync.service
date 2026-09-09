@@ -1,0 +1,11 @@
+[Unit]
+Description=Caldir and Glance background calendar sync
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment="PATH=/usr/lib/renCal/providers:%h/.local/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/bin/bash -c "caldir sync && %h/.config/omarchy/plugins/omarchy-glance/sync/caldir-export"
+
+[Install]
+WantedBy=default.target

@@ -29,6 +29,10 @@ BarWidget {
   // format from then on rather than something that reverts on restart.
   readonly property string activeFormat: configuredFormat
 
+  // A seconds label needs the clock to tick sixty times as often, and a
+  // repaint a second is a price only the formats that print seconds pay.
+  readonly property bool showsSeconds: Model.clockNeedsSeconds(activeFormat)
+
   // ---- The next thing coming up. The panel owns the file and the calendar
   //      filtering; the bar just reads the already-filtered list off it. The
   //      panel Loader is active even while closed, so this keeps counting
@@ -139,7 +143,7 @@ BarWidget {
 
   SystemClock {
     id: clock
-    precision: SystemClock.Minutes
+    precision: root.showsSeconds ? SystemClock.Seconds : SystemClock.Minutes
     onDateChanged: root.displayDate = date
   }
 
@@ -177,6 +181,7 @@ BarWidget {
     fixedHeight: root.vertical ? root.verticalLines.length * Style.bar.iconSlot : -1
     horizontalMargin: 8.75
     verticalPadding: 8.75
+    tooltipText: "Right-click to toggle format"
 
     onPressed: function(b) {
       if (b === Qt.RightButton) root.cycleFormat()

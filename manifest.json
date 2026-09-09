@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "omarchy-glance",
   "name": "Omarchy Glance",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": "Tiago Vicente",
   "description": "Centered calendar, Caldir agenda, and interactive notification history",
   "kinds": [

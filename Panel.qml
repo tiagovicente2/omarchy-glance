@@ -69,7 +69,11 @@ Panel {
   // convention. Clicking the grid's "W" heading writes the choice back to
   // shell.json.
   readonly property int weekStart: Model.normalizedWeekStart(setting("weekStartDay", null), Qt.locale().firstDayOfWeek)
-  readonly property string nextWeekStartLabel: Qt.locale().dayName(Model.toggledWeekStart(weekStart), Locale.LongFormat)
+  // The interface is English throughout, so day names are not taken from the
+  // system locale. Where the week starts still is: that is a regional
+  // convention rather than a translation, and it stays overridable above.
+  readonly property var labelLocale: Qt.locale("en_US")
+  readonly property string nextWeekStartLabel: labelLocale.dayName(Model.toggledWeekStart(weekStart), Locale.LongFormat)
   readonly property var weekdays: Model.weekdayOrder(weekStart)
   readonly property var weeks: Model.monthGrid(viewYear, viewMonth, weekStart, todayKey, eventIndex)
 
@@ -262,7 +266,9 @@ Panel {
   // Summoning by hotkey moves no pointer, so a hover the bar was still
   // holding must not keep the center indicators revealed behind the panel.
   function setCenterHoverRevealSuppressed(value) {
-    if (root.bar && "centerHoverRevealSuppressed" in root.bar)
+    if (root.bar && typeof root.bar.setCenterHoverRevealSuppressed === "function")
+      root.bar.setCenterHoverRevealSuppressed(value)
+    else if (root.bar && "centerHoverRevealSuppressed" in root.bar)
       root.bar.centerHoverRevealSuppressed = value
   }
 
@@ -360,10 +366,9 @@ Panel {
     setWeekStart(Model.toggledWeekStart(root.weekStart))
   }
 
-  // Locale short day names, trimmed of the trailing period some locales
-  // carry ("man." -> "MAN") so the header row stays a clean band of caps.
+  // English short day names, matching the rest of the interface.
   function weekdayLabel(weekday) {
-    return String(Qt.locale().dayName(weekday, Locale.ShortFormat)).replace(/\.$/, "").toUpperCase()
+    return String(labelLocale.dayName(weekday, Locale.ShortFormat)).toUpperCase()
   }
 
   // watchChanges is the point of this whole widget. The sync rewrites the
@@ -529,6 +534,7 @@ Panel {
 
               Text {
                 id: heroDate
+                textFormat: Text.PlainText
                 anchors.verticalCenter: parent.verticalCenter
                 text: Qt.formatDate(root.today, "MMMM d")
                 color: heroMouse.containsMouse
@@ -673,6 +679,7 @@ Panel {
 
               Text {
                 id: yearLabel
+                textFormat: Text.PlainText
                 visible: root.showYearProgress && !root.editingLife
                 anchors.left: parent.left
                 anchors.verticalCenter: parent.verticalCenter
@@ -685,6 +692,7 @@ Panel {
 
               Text {
                 id: yearPercent
+                textFormat: Text.PlainText
                 visible: root.showYearProgress && !root.editingLife
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
@@ -745,6 +753,7 @@ Panel {
 
               Text {
                 id: lifePercent
+                textFormat: Text.PlainText
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
                 text: root.lifeDonePercent + "%"
@@ -869,6 +878,7 @@ Panel {
                   model: root.weekdays
 
                   Text {
+                    textFormat: Text.PlainText
                     required property var modelData
                     width: root.cellWidth
                     height: Style.space(16)
@@ -892,6 +902,7 @@ Panel {
                   spacing: root.cellSpacing
 
                   Text {
+                    textFormat: Text.PlainText
                     width: root.weekColumnWidth
                     height: root.cellHeight
                     horizontalAlignment: Text.AlignHCenter
@@ -930,6 +941,7 @@ Panel {
 
                       Text {
                         id: dayNumber
+                        textFormat: Text.PlainText
                         anchors.centerIn: parent
                         // Lifted just enough to clear the dots, and only on
                         // days that have any, so an empty month does not
@@ -1005,6 +1017,7 @@ Panel {
 
               Text {
                 id: monthLabel
+                textFormat: Text.PlainText
                 anchors.horizontalCenter: parent.horizontalCenter
                 anchors.verticalCenter: parent.verticalCenter
                 // Fixed width so the chevrons hold still between a

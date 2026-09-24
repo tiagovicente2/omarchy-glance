@@ -1,5 +1,7 @@
 import QtQuick
+import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Effects
 import Quickshell
 import Quickshell.Io
 import qs.Commons
@@ -8,6 +10,7 @@ import qs.Ui
 Item {
   id: root
 
+  property var bar: null
   property var notificationService: null
   property color foreground: Color.foreground
   property string fontFamily: Style.font.family
@@ -15,28 +18,48 @@ Item {
   readonly property color borderColor: Style.normalBorderFor(foreground, Color.accent)
   readonly property color hoverColor: Style.hoverFillFor(foreground, Color.accent)
   readonly property int cardRadius: notificationService ? notificationService.cornerRadius : Style.cornerRadius
+
   readonly property string historyDir: (Quickshell.env("HOME") || "") + "/.local/state/omarchy/notifications/history"
+  readonly property string popupDir: (Quickshell.env("HOME") || "") + "/.local/state/omarchy/notifications"
   readonly property string imagesDir: (Quickshell.env("HOME") || "") + "/.local/state/omarchy/notifications/images"
+  readonly property string ncImagesDir: (Quickshell.env("HOME") || "") + "/.local/state/omarchy-notification-center/images"
+
+  readonly property string ncBinPath: (Quickshell.env("HOME") || "") + "/.config/omarchy/plugins/jankeesvw.notification-center/bin/notification-center"
+  readonly property string unreadBinPath: Qt.resolvedUrl("bin/glance-unread").toString().replace(/^file:\/\//, "")
 
   signal notificationActivated()
 
-  // Arrow keys always navigate this list while the panel is open — no hover
-  // required. Left/Right still drive the calendar on the other side; today's
-  // grid can always be reached with the 't' key or a click, and the '[' ']'
-  // '{' '}' text keys keep stepping months and years.
+  // Arrow keys navigate this list while the panel is open.
   property bool cursorActive: false
   property int cursorIndex: -1
 
   ListModel { id: historyModel }
 
-  // Clearing history is asynchronous in the first-party service. Ignore any
-  // read already in flight until the panel is opened again, otherwise stale
-  // output can repopulate rows immediately after "Dismiss all".
+  // Persistent unread tracking
+  PersistentProperties {
+    id: localState
+    reloadableId: "omarchy-glance-notifications"
+    property double lastSeen: 0
+  }
+
+  property double readMark: 0
+  property double nowMs: Date.now()
+
   property bool discardPendingResults: false
+  property bool reloadPending: false
 
   function refresh() {
     discardPendingResults = false
+    nowMs = Date.now()
     root.deactivateCursor()
+
+    readMark = Number(localState.lastSeen || 0)
+    localState.lastSeen = nowMs
+    Quickshell.execDetached(["bash", "-c",
+      "unreadbin=\"$1\"; ncbin=\"$2\"; stamp=\"$3\"\n" +
+      "[[ -x $unreadbin ]] && \"$unreadbin\" mark-seen \"$stamp\" >/dev/null 2>&1 || true\n" +
+      "[[ -x $ncbin ]] && \"$ncbin\" seen \"$stamp\" >/dev/null 2>&1 || true",
+      "--", unreadBinPath, ncBinPath, String(nowMs)])
     reload()
   }
 
@@ -46,34 +69,81 @@ Item {
       return
     }
     historyLoader.command = ["bash", "-c",
-      "find \"$1\" -maxdepth 1 -type f -name '*.json' -printf '%f\\n' 2>/dev/null | sort -rn | head -n 10 | while IFS= read -r file; do cat \"$1/$file\"; done",
-      "--", historyDir]
+      "ncbin=\"$1\"; popup=\"$2\"; hist=\"$3\"\n" +
+      "if [[ -x $ncbin ]]; then\n" +
+      "  {\n" +
+      "    find \"$popup\" -maxdepth 1 -type f -name '*.json' -exec cat {} + 2>/dev/null\n" +
+      "    \"$ncbin\" list 30 2>/dev/null\n" +
+      "  } | jq -c -s '\n" +
+      "    (.[0:-1][]? // empty), (.[-1][]? // empty)\n" +
+      "    | select(.key or .timestamp or .id)\n" +
+      "  ' 2>/dev/null | jq -c -s '\n" +
+      "    unique_by(.key // (.timestamp|tostring))\n" +
+      "    | sort_by(.timestamp)\n" +
+      "    | reverse\n" +
+      "    | .[0:30]\n" +
+      "    | .[]\n" +
+      "  ' 2>/dev/null\n" +
+      "else\n" +
+      "  find \"$popup\" \"$hist\" -maxdepth 1 -type f -name '*.json' 2>/dev/null | while read -r f; do\n" +
+      "    cat \"$f\" 2>/dev/null; echo \"\"\n" +
+      "  done | jq -c -s '\n" +
+      "    map(select(.timestamp or .id))\n" +
+      "    | sort_by(.timestamp)\n" +
+      "    | reverse\n" +
+      "    | .[0:30]\n" +
+      "    | .[]\n" +
+      "  ' 2>/dev/null\n" +
+      "fi",
+      "--", ncBinPath, popupDir, historyDir]
     historyLoader.running = true
   }
-
-  property bool reloadPending: false
 
   function replaceHistory(raw) {
     if (discardPendingResults) return
     historyModel.clear()
     var lines = String(raw || "").split("\n")
-    for (var i = 0; i < lines.length && historyModel.count < 10; i++) {
+    var seenKeys = ({})
+    for (var i = 0; i < lines.length && historyModel.count < 30; i++) {
       var line = lines[i].trim()
       if (!line) continue
       try {
         var entry = JSON.parse(line)
+        var origId = Number(entry.originalId || entry.id || 0)
+        var stamp = Number(entry.timestamp || 0)
+        if (!stamp && entry.key) {
+          stamp = Number(String(entry.key).split("-")[0] || 0)
+        }
+        var key = String(entry.key || (stamp + "-" + origId))
+        if (seenKeys[key]) continue
+        seenKeys[key] = true
+
+        var fileSrc = root.extractMediaFilePath(entry.file || entry.execArgv || entry.exec)
+        var previewSrc = entry.preview || ""
+        if (!previewSrc && fileSrc) {
+          if (root.isVideoFile(fileSrc)) {
+            previewSrc = "file://" + ncImagesDir + "/" + key + "-preview"
+          } else {
+            previewSrc = Util.fileUrl(fileSrc)
+          }
+        }
+
         historyModel.append({
-          id: Number(entry.id || 0),
-          originalId: Number(entry.originalId || entry.id || 0),
+          key: key,
+          id: origId,
+          originalId: origId,
           app: String(entry.app || ""),
           appIcon: String(entry.appIcon || ""),
           summary: String(entry.summary || ""),
           body: String(entry.body || ""),
           image: String(entry.image || ""),
+          preview: String(previewSrc || ""),
+          file: String(fileSrc || ""),
           glyph: String(entry.glyph || ""),
-          exec: String(entry.exec || ""),
-          urgency: Number(entry.urgency || 0),
-          timestamp: Number(entry.timestamp || 0)
+          exec: "",
+          urgency: Number(entry.urgency || 1),
+          timestamp: stamp,
+          day: dayOf(stamp)
         })
       } catch (error) {
         console.warn("clock notifications: invalid history entry:", error)
@@ -85,12 +155,18 @@ Item {
   function dismissAll() {
     discardPendingResults = true
     reloadPending = false
+    localState.lastSeen = Date.now()
+
     if (notificationService && typeof notificationService.clearHistory === "function") {
       notificationService.clearHistory()
     }
     Quickshell.execDetached(["bash", "-c",
-      "rm -f -- \"$1\"/*.json \"$2\"/* 2>/dev/null",
-      "--", historyDir, imagesDir])
+      "ncbin=\"$1\"; popup=\"$2\"; hist=\"$3\"; unreadbin=\"$4\"\n" +
+      "[[ -x $ncbin ]] && \"$ncbin\" clear >/dev/null 2>&1 || true\n" +
+      "[[ -x $unreadbin ]] && \"$unreadbin\" mark-seen >/dev/null 2>&1 || true\n" +
+      "rm -f -- \"$popup\"/*.json \"$hist\"/*.json 2>/dev/null || true",
+      "--", ncBinPath, popupDir, historyDir, unreadBinPath])
+
     historyModel.clear()
     root.deactivateCursor()
   }
@@ -100,19 +176,71 @@ Item {
     return name !== "" && name !== "notify-send" && name !== "omarchy-action"
   }
 
+  function isVideoFile(path) {
+    return /\.(?:mp4|mkv|webm|mov|avi)$/i.test(String(path || ""))
+  }
+
+  function isImageFile(path) {
+    return /\.(?:jpe?g|png|webp|gif)$/i.test(String(path || ""))
+  }
+
+  function extractMediaFilePath(value) {
+    if (!value) return ""
+    var items = []
+    if (Array.isArray(value)) {
+      items = value
+    } else {
+      var str = String(value).trim()
+      if (!str) return ""
+      if (str.charAt(0) === "[") {
+        try {
+          var parsed = JSON.parse(str)
+          if (Array.isArray(parsed)) items = parsed
+        } catch (_) {}
+      }
+      if (items.length === 0) {
+        items = [str]
+      }
+    }
+
+    var mediaRegex = /(?:file:\/\/)?(\/[^"'\r\n\0]+\.(?:jpe?g|png|webp|gif|mp4|mkv|webm|mov|avi))(?=$|["'\s])/i
+    for (var i = 0; i < items.length; i++) {
+      var itemStr = String(items[i] || "").trim()
+      if (!itemStr) continue
+      var clean = itemStr.replace(/^file:\/\//, "")
+      if (/^\/[^"'\r\n\0]+\.(?:jpe?g|png|webp|gif|mp4|mkv|webm|mov|avi)$/i.test(clean)) {
+        return clean
+      }
+      var m = mediaRegex.exec(itemStr)
+      if (m && m[1]) return m[1].replace(/^file:\/\//, "")
+    }
+    return ""
+  }
+
+  function appInitial(appName) {
+    var name = String(appName || "").trim()
+    return name === "" ? "?" : name.charAt(0).toUpperCase()
+  }
+
   function canOpen(entry) {
-    if (!entry) return false
-    if (String(entry.exec || "") !== "") return true
-    return isFocusableApp(entry.app)
+    return !!entry
   }
 
   function dismissHistoryEntry(index) {
     if (index < 0 || index >= historyModel.count) return
     var entry = historyModel.get(index)
-    var stem = String(entry.timestamp || 0) + "-" + String(entry.originalId || 0)
+    if (!entry) return
+
+    var key = String(entry.key || "")
+    var origId = String(entry.originalId || entry.id || "")
+    var stamp = String(entry.timestamp || "")
+
     Quickshell.execDetached(["bash", "-c",
-      "rm -f -- \"$1/$3.json\" \"$2/$3\"-* 2>/dev/null",
-      "--", historyDir, imagesDir, stem])
+      "ncbin=\"$1\"; popup=\"$2\"; hist=\"$3\"; key=\"$4\"; stem=\"$5\"\n" +
+      "[[ -x $ncbin ]] && \"$ncbin\" remove \"$key\" >/dev/null 2>&1 || true\n" +
+      "rm -f -- \"$popup/$stem.json\" \"$hist/$stem.json\" \"$popup/$key.json\" \"$hist/$key.json\" 2>/dev/null || true",
+      "--", ncBinPath, popupDir, historyDir, key, stamp + "-" + origId])
+
     historyModel.remove(index)
     root.clampCursor()
   }
@@ -120,24 +248,35 @@ Item {
   function openNotification(index) {
     if (index < 0 || index >= historyModel.count) return
     var entry = historyModel.get(index)
-    if (!canOpen(entry)) return
+    if (!entry) return
 
-    var command = String(entry.exec || "")
-    if (command !== "") {
-      Util.execDetached(command)
-    } else {
-      launchApp(entry.app)
+    var filePath = String(entry.file || "")
+    if (filePath === "") {
+      filePath = extractMediaFilePath(entry.file || entry.execArgv || entry.exec || entry.image)
     }
+
+    // 1. If a media file (image, screenshot, or video recording) is resolved, open directly via xdg-open without a shell
+    if (filePath !== "") {
+      Quickshell.execDetached(["xdg-open", filePath])
+      dismissHistoryEntry(index)
+      notificationActivated()
+      return
+    }
+
+    // 2. Otherwise focus or launch the application safely
+    if (isFocusableApp(entry.app)) {
+      launchApp(entry.app)
+      dismissHistoryEntry(index)
+      notificationActivated()
+      return
+    }
+
+    // 3. System / informational notifications (notify-send, omarchy-action without file, etc.):
+    // Clicking acknowledges and dismisses the notification, closing Glance
     dismissHistoryEntry(index)
     notificationActivated()
   }
 
-  // Launch-or-focus a notification's sender. The notification service's own
-  // focusApp only focuses a window that already exists, which makes clicking
-  // a history entry for a closed app do nothing. Resolve the sender's desktop
-  // file instead: focus a matching window when one is open, otherwise launch
-  // the app (uwsm-app runs the desktop entry through the session manager, the
-  // same path omarchy's own launch-or-focus helpers use).
   function launchApp(appName) {
     if (launchProc.running) return
     launchProc.command = ["bash", "-c", root.launchOrFocusScript, "--", String(appName || "")]
@@ -173,11 +312,7 @@ Item {
     running: false
   }
 
-  // ---- Keyboard cursor. Selection only ever lands on an openable entry, so
-  //      Enter always has something to act on, and the pointer places the
-  //      cursor on whatever card it is hovering — Enter opens exactly what
-  //      is pointed at.
-
+  // Keyboard navigation
   function activateCursor() {
     if (historyModel.count === 0) return
     cursorActive = true
@@ -190,7 +325,6 @@ Item {
     if (!canOpenAt(index)) return
     cursorActive = true
     cursorIndex = index
-    positionCursor()
   }
 
   function deactivateCursor() {
@@ -209,10 +343,6 @@ Item {
     positionCursor()
   }
 
-  // True when the cursor opened something; false when the panel should fall
-  // back to its own default (focussing today) instead. Enter engages the
-  // cursor first, so a bare Enter opens the most recent openable
-  // notification without any arrowing.
   function handleActivate() {
     activateCursor()
     if (cursorIndex < 0) return false
@@ -268,16 +398,32 @@ Item {
       .trim()
   }
 
-  function timeLabel(value) {
-    var timestamp = Number(value || 0)
-    if (!isFinite(timestamp) || timestamp <= 0) return ""
-    var date = new Date(timestamp)
-    var now = new Date()
-    if (date.getFullYear() === now.getFullYear()
-        && date.getMonth() === now.getMonth()
-        && date.getDate() === now.getDate())
-      return Qt.formatTime(date, "HH:mm")
-    return Qt.formatDate(date, "MMM d")
+  function dayOf(timestamp) {
+    if (!timestamp || timestamp <= 0) return "Earlier"
+    var when = new Date(timestamp)
+    var now = new Date(root.nowMs)
+    var midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+    if (timestamp >= midnight) return "Today"
+    if (timestamp >= midnight - 86400000) return "Yesterday"
+    if (timestamp >= midnight - 6 * 86400000) return Qt.formatDateTime(when, "dddd")
+    if (when.getFullYear() === now.getFullYear()) return Qt.formatDateTime(when, "d MMMM")
+    return Qt.formatDateTime(when, "d MMMM yyyy")
+  }
+
+  function timeLabel(timestamp) {
+    var stamp = Number(timestamp || 0)
+    if (!isFinite(stamp) || stamp <= 0) return ""
+    var age = Math.max(0, root.nowMs - stamp)
+    if (age < 60000) return "now"
+    if (age < 3600000) return Math.round(age / 60000) + "m ago"
+    return Qt.formatDateTime(new Date(stamp), "HH:mm")
+  }
+
+  Timer {
+    interval: 30000
+    running: root.visible
+    repeat: true
+    onTriggered: root.nowMs = Date.now()
   }
 
   Process {
@@ -358,17 +504,48 @@ Item {
       visible: count > 0
       boundsBehavior: Flickable.StopAtBounds
 
+      readonly property real lane: Style.space(8)
+      ScrollBar.vertical: ScrollBar {
+        id: listScroll
+        policy: ScrollBar.AsNeeded
+      }
+
+      section.property: "day"
+      section.criteria: ViewSection.FullString
+      section.delegate: Item {
+        id: daySection
+        required property string section
+        width: notificationList.width - notificationList.lane
+        height: dayLabel.implicitHeight + Style.space(12)
+
+        Text {
+          id: dayLabel
+          anchors.left: parent.left
+          anchors.leftMargin: Style.space(2)
+          anchors.bottom: parent.bottom
+          anchors.bottomMargin: Style.space(4)
+          text: daySection.section.toUpperCase()
+          color: root.dimForeground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          font.letterSpacing: 1
+          font.bold: true
+        }
+      }
+
       delegate: BorderSurface {
         id: card
 
         required property int index
+        required property string key
         required property string app
         required property string appIcon
         required property string summary
         required property string body
         required property string image
+        required property string preview
+        required property string file
         required property string glyph
-        required property string exec
         required property int urgency
         required property double timestamp
         required property int originalId
@@ -377,16 +554,52 @@ Item {
         readonly property bool selected: root.cursorActive && card.index === root.cursorIndex
         readonly property string bodyText: root.readableBody(body)
         readonly property string resolvedIcon: root.iconSource(image !== "" ? image : appIcon)
+        readonly property bool unread: card.timestamp > root.readMark
 
-        width: notificationList.width
-        implicitHeight: cardContent.implicitHeight + Style.space(20)
+        readonly property string previewSource: {
+          if (card.preview !== "") return card.preview
+          if (card.file !== "" && !root.isVideoFile(card.file)) return Util.fileUrl(card.file)
+          return ""
+        }
+        readonly property bool hasPreview: previewSource !== "" && previewImg.status === Image.Ready
+
+        width: notificationList.width - notificationList.lane
+        implicitHeight: cardContent.implicitHeight + Style.space(16)
         radius: root.cardRadius
+
+        HoverHandler { id: cardHover }
+        readonly property bool hovered: cardHover.hovered
+
         color: card.selected
           ? Style.selectedFillFor(root.foreground, Color.accent)
-          : (opens && cardMouse.containsMouse ? root.hoverColor : "transparent")
+          : (cardHover.hovered ? root.hoverColor : "transparent")
         borderSpec: Border.flat(card.selected
           ? Style.selectedBorderFor(root.foreground, Color.accent)
           : root.borderColor, Style.normalBorderWidth)
+
+        // Urgent alert: accent bar on the leading edge
+        Rectangle {
+          visible: card.urgency === 2
+          anchors.left: parent.left
+          anchors.top: parent.top
+          anchors.bottom: parent.bottom
+          anchors.margins: Style.space(6)
+          width: Style.space(3)
+          radius: width / 2
+          color: Color.urgent
+        }
+
+        // Unread indicator: accent dot on the leading edge
+        Rectangle {
+          visible: card.unread && card.urgency !== 2
+          anchors.left: parent.left
+          anchors.leftMargin: Style.space(4)
+          anchors.verticalCenter: parent.verticalCenter
+          width: Style.space(5)
+          height: width
+          radius: width / 2
+          color: Color.accent
+        }
 
         MouseArea {
           id: cardMouse
@@ -394,43 +607,14 @@ Item {
           acceptedButtons: Qt.LeftButton | Qt.RightButton
           enabled: true
           hoverEnabled: true
-          cursorShape: card.opens ? Qt.PointingHandCursor : Qt.ArrowCursor
+          cursorShape: Qt.PointingHandCursor
           onEntered: root.selectCursor(card.index)
           onClicked: function(mouse) {
             if (mouse.button === Qt.RightButton) {
               root.dismissHistoryEntry(card.index)
-            } else if (card.opens) {
+            } else {
               root.openNotification(card.index)
             }
-          }
-        }
-
-        Item {
-          anchors.top: parent.top
-          anchors.right: parent.right
-          anchors.topMargin: Style.space(4)
-          anchors.rightMargin: Style.space(6)
-          width: Style.space(18)
-          height: Style.space(18)
-          z: 2
-          opacity: cardMouse.containsMouse || closeArea.containsMouse ? 1 : 0
-          visible: opacity > 0
-
-          Behavior on opacity { NumberAnimation { duration: 100 } }
-
-          Text {
-            anchors.centerIn: parent
-            text: "✕"
-            color: closeArea.containsMouse ? root.foreground : root.dimForeground
-            font.pixelSize: Math.round(Style.font.caption * 1.1)
-          }
-
-          MouseArea {
-            id: closeArea
-            anchors.fill: parent
-            hoverEnabled: true
-            cursorShape: Qt.PointingHandCursor
-            onClicked: root.dismissHistoryEntry(card.index)
           }
         }
 
@@ -438,15 +622,49 @@ Item {
           id: cardContent
           anchors.left: parent.left
           anchors.right: parent.right
-          anchors.verticalCenter: parent.verticalCenter
-          anchors.leftMargin: card.borderLeft + Style.space(10)
-          anchors.rightMargin: card.borderRight + Style.space(10)
+          anchors.top: parent.top
+          anchors.topMargin: Style.space(10)
+          anchors.leftMargin: card.borderLeft + Style.space(12)
+          anchors.rightMargin: card.borderRight + Style.space(12)
           spacing: Style.space(10)
 
+          // Avatar / App Icon badge
           Item {
-            Layout.preferredWidth: Style.space(34)
-            Layout.preferredHeight: Style.space(34)
+            id: avatar
+            Layout.preferredWidth: Style.space(32)
+            Layout.preferredHeight: Style.space(32)
             Layout.alignment: Qt.AlignTop
+
+            Rectangle {
+              anchors.fill: parent
+              radius: Style.space(9)
+              visible: !avatar.hasIcon
+              color: root.foreground
+              opacity: 0.12
+            }
+
+            Text {
+              textFormat: Text.PlainText
+              anchors.centerIn: parent
+              visible: !avatar.hasIcon && card.glyph === ""
+              text: (card.summary.indexOf("Screen recording") !== -1 || root.isVideoFile(card.file)) ? "󰻂" : root.appInitial(card.app)
+              font.family: root.fontFamily
+              font.pixelSize: (card.summary.indexOf("Screen recording") !== -1 || root.isVideoFile(card.file)) ? Style.font.icon : Style.font.caption
+              font.bold: true
+              color: root.foreground
+              opacity: 0.7
+            }
+
+            Text {
+              textFormat: Text.PlainText
+              anchors.centerIn: parent
+              visible: !avatar.hasIcon && card.glyph !== ""
+              text: card.glyph
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.icon
+              color: root.foreground
+              opacity: 0.8
+            }
 
             Image {
               id: cardIcon
@@ -457,79 +675,144 @@ Item {
               fillMode: Image.PreserveAspectFit
               asynchronous: true
               smooth: true
-              visible: source !== "" && status !== Image.Error
+              visible: avatar.hasIcon
             }
 
-            Text {
-              anchors.centerIn: parent
-              visible: !cardIcon.visible && card.glyph !== ""
-              text: card.glyph
-              textFormat: Text.PlainText
-              color: root.foreground
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.icon
-            }
-
-            Text {
-              anchors.centerIn: parent
-              visible: !cardIcon.visible && card.glyph === ""
-              text: "󰂚"
-              color: root.dimForeground
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.icon
-            }
+            readonly property bool hasIcon: card.resolvedIcon !== "" && cardIcon.status !== Image.Error
           }
 
+          // Content column
           ColumnLayout {
             Layout.fillWidth: true
             spacing: Style.space(2)
 
+            // Header row: App Name (left) and Time / Dismiss button (right)
             RowLayout {
               Layout.fillWidth: true
               spacing: Style.space(6)
 
               Text {
-                Layout.fillWidth: true
-                text: card.summary !== "" ? card.summary : card.app
                 textFormat: Text.PlainText
-                color: root.foreground
-                font.family: "Liberation Sans"
-                font.pixelSize: Style.font.subtitle
-                font.bold: true
+                Layout.fillWidth: true
+                text: card.app !== "" ? card.app : "System"
                 elide: Text.ElideRight
-                maximumLineCount: 1
-              }
-
-              Text {
-                text: root.timeLabel(card.timestamp)
-                color: root.dimForeground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
+                color: root.foreground
+                opacity: 0.5
+              }
+
+              Item {
+                Layout.preferredWidth: Math.max(whenText.implicitWidth, Style.space(18))
+                Layout.preferredHeight: Math.max(whenText.implicitHeight, Style.space(18))
+                Layout.alignment: Qt.AlignVCenter
+
+                Text {
+                  id: whenText
+                  textFormat: Text.PlainText
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  visible: !cardHover.hovered
+                  text: root.timeLabel(card.timestamp)
+                  color: root.dimForeground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  opacity: 0.45
+                }
+
+                Rectangle {
+                  id: dismissBtn
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  visible: cardHover.hovered
+                  width: Style.space(18)
+                  height: width
+                  radius: width / 2
+                  color: root.foreground
+                  opacity: dismissHover.hovered ? 0.25 : 0.15
+
+                  Text {
+                    textFormat: Text.PlainText
+                    anchors.centerIn: parent
+                    text: "×"
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    color: root.foreground
+                  }
+
+                  HoverHandler { id: dismissHover }
+                  TapHandler {
+                    onTapped: root.dismissHistoryEntry(card.index)
+                  }
+                }
               }
             }
 
+            // Summary / Title
             Text {
+              textFormat: Text.PlainText
+              Layout.fillWidth: true
+              visible: card.summary !== ""
+              text: card.summary
+              font.family: "Liberation Sans"
+              font.pixelSize: Style.font.body
+              font.bold: true
+              color: root.foreground
+              elide: Text.ElideRight
+              maximumLineCount: 1
+            }
+
+            // Body message
+            Text {
+              textFormat: Text.PlainText
               Layout.fillWidth: true
               visible: card.bodyText !== ""
               text: card.bodyText
-              textFormat: Text.PlainText
-              color: root.dimForeground
-              font.family: "Liberation Sans"
-              font.pixelSize: Style.font.bodySmall
               wrapMode: Text.WordWrap
               elide: Text.ElideRight
               maximumLineCount: 2
+              font.family: "Liberation Sans"
+              font.pixelSize: Style.font.caption
+              color: root.foreground
+              opacity: 0.75
             }
 
-            Text {
+            // Preview image
+            Item {
+              id: previewBox
               Layout.fillWidth: true
-              visible: !card.opens && card.app !== ""
-              text: card.app
-              textFormat: Text.PlainText
-              color: Qt.darker(root.dimForeground, 1.2)
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              elide: Text.ElideRight
+              Layout.topMargin: Style.space(4)
+              Layout.preferredHeight: card.hasPreview && width > 0 ? Math.min(width * 9 / 16, Style.space(104)) : 0
+              visible: card.hasPreview
+              clip: true
+
+              Image {
+                id: previewImg
+                anchors.fill: parent
+                source: card.previewSource
+                sourceSize.width: Math.round(Math.max(1, width) * Screen.devicePixelRatio)
+                fillMode: Image.PreserveAspectCrop
+                asynchronous: true
+                smooth: true
+
+                layer.enabled: true
+                layer.effect: MultiEffect {
+                  maskEnabled: true
+                  maskSource: previewMask
+                  maskThresholdMin: 0.5
+                  maskSpreadAtMin: 1.0
+                }
+              }
+
+              Rectangle {
+                id: previewMask
+                anchors.fill: parent
+                radius: Style.space(8)
+                color: "black"
+                visible: false
+                layer.enabled: true
+                layer.smooth: true
+              }
             }
           }
         }

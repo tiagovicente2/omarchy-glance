@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
+config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+glance_state="$state_home/omarchy-glance"
+nc_state="$state_home/omarchy-notification-center"
+nc_bin="$config_home/omarchy/plugins/jankeesvw.notification-center/bin/notification-center"
+popups="$state_home/omarchy/notifications"
+history="$state_home/omarchy/notifications/history"
+
+mkdir -p "$glance_state"
+
+get_seen() {
+  local s1=0 s2=0
+  [[ -f "$glance_state/seen" ]] && s1=$(cat "$glance_state/seen" 2>/dev/null || echo 0)
+  [[ -f "$nc_state/seen" ]] && s2=$(cat "$nc_state/seen" 2>/dev/null || echo 0)
+  [[ "$s1" =~ ^[0-9]+$ ]] || s1=0
+  [[ "$s2" =~ ^[0-9]+$ ]] || s2=0
+  if (( s1 > s2 )); then
+    echo "$s1"
+  else
+    echo "$s2"
+  fi
+}
+
+cmd_unread() {
+  local seen
+  seen=$(get_seen)
+
+  # If notification-center bin exists and is executable, we can use it, but also ensure seen is respected
+  if [[ -x "$nc_bin" && -f "$nc_state/archive.jsonl" ]]; then
+    local nc_seen=0
+    [[ -f "$nc_state/seen" ]] && nc_seen=$(cat "$nc_state/seen" 2>/dev/null || echo 0)
+    if [[ "$nc_seen" =~ ^[0-9]+$ ]] && (( seen > nc_seen )); then
+      printf '%s\n' "$seen" > "$nc_state/seen" 2>/dev/null || true
+    fi
+    local res
+    res=$("$nc_bin" unread 2>/dev/null || echo "")
+    if [[ -n "$res" && "$res" == *"\"unread\":"* ]]; then
+      local extra=0
+      for f in "$popups"/*.json; do
+        [[ -f "$f" ]] || continue
+        local t
+        t=$(jq -r '.timestamp // 0' "$f" 2>/dev/null || echo 0)
+        if [[ "$t" =~ ^[0-9]+$ ]] && (( t > seen )); then
+          (( extra++ )) || true
+        fi
+      done
+      local nc_unread
+      nc_unread=$(echo "$res" | jq -r '.unread // 0' 2>/dev/null || echo 0)
+      local total=$nc_unread
+      (( extra > total )) && total=$extra
+      printf '{"ok":true,"unread":%d}\n' "$total"
+      return
+    fi
+  fi
+
+  # Fallback: scan notifications directory
+  local count=0
+  for f in "$popups"/*.json; do
+    [[ -f "$f" ]] || continue
+    local t
+    t=$(jq -r '.timestamp // 0' "$f" 2>/dev/null || echo 0)
+    [[ "$t" =~ ^[0-9]+$ ]] && (( t > seen )) && (( count++ )) || true
+  done
+
+  for f in "$history"/*.json; do
+    [[ -f "$f" ]] || continue
+    local base="${f##*/}"
+    base="${base%.json}"
+    local stamp="${base%%-*}"
+    if [[ "$stamp" =~ ^[0-9]+$ ]]; then
+      (( stamp > seen )) && (( count++ )) || true
+    else
+      local t
+      t=$(jq -r '.timestamp // 0' "$f" 2>/dev/null || echo 0)
+      [[ "$t" =~ ^[0-9]+$ ]] && (( t > seen )) && (( count++ )) || true
+    fi
+  done
+
+  printf '{"ok":true,"unread":%d}\n' "$count"
+}
+
+cmd_mark_seen() {
+  local stamp="${1:-}"
+  if [[ -z "$stamp" || ! "$stamp" =~ ^[0-9]+$ ]]; then
+    stamp="$(($(date +%s%N) / 1000000))"
+  fi
+
+  printf '%s\n' "$stamp" > "$glance_state/seen"
+  if [[ -d "$nc_state" ]]; then
+    printf '%s\n' "$stamp" > "$nc_state/seen" 2>/dev/null || true
+  fi
+
+  if [[ -x "$nc_bin" ]]; then
+    "$nc_bin" seen "$stamp" >/dev/null 2>&1 || true
+  fi
+
+  printf '{"ok":true,"seen":%s}\n' "$stamp"
+}
+
+cmd_watch() {
+  mkdir -p "$popups" "$history" "$glance_state"
+  [[ -d "$nc_state" ]] || mkdir -p "$nc_state" 2>/dev/null || true
+
+  command -v inotifywait >/dev/null 2>&1 || {
+    while true; do sleep 5; echo "poll"; done
+    exit 0
+  }
+
+  exec inotifywait -m -q -e close_write -e moved_to -e delete --format '%e %w%f' \
+    "$popups" "$history" "$glance_state" "$nc_state" 2>/dev/null
+}
+
+case "${1:-}" in
+  unread)    cmd_unread ;;
+  mark-seen) shift; cmd_mark_seen "$@" ;;
+  seen)      printf '{"ok":true,"seen":%s}\n' "$(get_seen)" ;;
+  watch)     cmd_watch ;;
+  *)         echo "Usage: glance-unread {unread|mark-seen [timestamp]|seen|watch}" >&2; exit 1 ;;
+esac

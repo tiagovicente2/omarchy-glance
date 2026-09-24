@@ -92,7 +92,13 @@ BarWidget {
   //      bar-widget root.
   readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
 
+  onOpenedChanged: {
+    if (root.opened) root.markSeen()
+    else root.checkUnread()
+  }
+
   function open() {
+    root.markSeen()
     if (panelLoader.item) panelLoader.item.open()
   }
 
@@ -101,6 +107,7 @@ BarWidget {
   }
 
   function togglePanel() {
+    if (!root.opened) root.markSeen()
     if (panelLoader.item) panelLoader.item.toggle()
   }
 
@@ -171,6 +178,71 @@ BarWidget {
     function toggle(): void { root.togglePanel() }
   }
 
+  property int unreadCount: 0
+
+  readonly property string unreadScript:
+    Qt.resolvedUrl("bin/glance-unread").toString().replace(/^file:\/\//, "")
+
+  function checkUnread() {
+    if (unreadProc.running) return
+    unreadProc.command = [unreadScript, "unread"]
+    unreadProc.running = true
+  }
+
+  function markSeen() {
+    root.unreadCount = 0
+    if (markSeenProc.running) return
+    markSeenProc.command = [unreadScript, "mark-seen"]
+    markSeenProc.running = true
+  }
+
+  Process {
+    id: unreadProc
+    stdout: StdioCollector {
+      onStreamFinished: {
+        try {
+          var data = JSON.parse(text)
+          if (data && data.ok === true) {
+            root.unreadCount = Number(data.unread) || 0
+          }
+        } catch (e) {}
+      }
+    }
+  }
+
+  Process {
+    id: markSeenProc
+  }
+
+  Process {
+    id: watchProc
+    command: [root.unreadScript, "watch"]
+    running: true
+    stdout: SplitParser {
+      onRead: function(line) {
+        root.checkUnread()
+      }
+    }
+    onExited: restartWatch.restart()
+  }
+
+  Timer {
+    id: restartWatch
+    interval: 5000
+    onTriggered: if (!watchProc.running) watchProc.running = true
+  }
+
+  Timer {
+    interval: 10000
+    running: true
+    repeat: true
+    onTriggered: root.checkUnread()
+  }
+
+  Component.onCompleted: {
+    root.checkUnread()
+  }
+
   WidgetButton {
     id: button
     anchors.fill: parent
@@ -179,9 +251,11 @@ BarWidget {
     labelVisible: !root.vertical
     hasVisualContent: root.vertical ? root.verticalLines.length > 0 : text !== ""
     fixedHeight: root.vertical ? root.verticalLines.length * Style.bar.iconSlot : -1
-    horizontalMargin: 8.75
+    horizontalMargin: root.unreadCount > 0 && !root.vertical ? 18 : 8.75
     verticalPadding: 8.75
-    tooltipText: "Right-click to toggle format"
+    tooltipText: root.unreadCount > 0
+      ? (root.unreadCount === 1 ? "1 new notification" : (root.unreadCount + " new notifications"))
+      : "Right-click to toggle format"
 
     onPressed: function(b) {
       if (b === Qt.RightButton) root.cycleFormat()
@@ -208,6 +282,24 @@ BarWidget {
           color: button.foreground
         }
       }
+    }
+  }
+
+  Rectangle {
+    id: unreadDot
+    visible: opacity > 0
+    opacity: (root.unreadCount > 0 && !root.opened) ? 1 : 0
+    anchors.right: button.right
+    anchors.rightMargin: Style.space(5)
+    anchors.verticalCenter: button.verticalCenter
+    width: Style.space(6)
+    height: width
+    radius: width / 2
+    color: Color.accent
+    z: 2
+
+    Behavior on opacity {
+      NumberAnimation { duration: 140; easing.type: Easing.OutCubic }
     }
   }
 }

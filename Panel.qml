@@ -233,6 +233,7 @@ Panel {
     refresh()
     root.exportEvents()
     notificationHistory.refresh()
+    if (root.hostWidget && typeof root.hostWidget.markSeen === "function") root.hostWidget.markSeen()
     root.controller.show()
     // Set after showing, not before: showing hands the popout coordinator
     // over, which closes whichever panel was open, and that close clears the
@@ -1267,6 +1268,7 @@ Panel {
 
         NotificationHistory {
           id: notificationHistory
+          bar: root.bar
           Layout.fillWidth: true
           Layout.fillHeight: true
           Layout.preferredWidth: Style.space(380)

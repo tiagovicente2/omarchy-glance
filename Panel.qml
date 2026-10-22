@@ -258,6 +258,12 @@ Panel {
     else root.open()
   }
 
+  function refreshNotifications() {
+    if (notificationHistory && typeof notificationHistory.reload === "function") {
+      notificationHistory.reload()
+    }
+  }
+
   function switchPanel(direction) {
     if (root.bar && typeof root.bar.switchPanelFrom === "function")
       return root.bar.switchPanelFrom(root.barIdentity, direction)

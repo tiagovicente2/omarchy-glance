@@ -221,6 +221,9 @@ BarWidget {
     stdout: SplitParser {
       onRead: function(line) {
         root.checkUnread()
+        if (root.opened && panelLoader.item && typeof panelLoader.item.refreshNotifications === "function") {
+          panelLoader.item.refreshNotifications()
+        }
       }
     }
     onExited: restartWatch.restart()

@@ -69,33 +69,29 @@ Item {
       return
     }
     historyLoader.command = ["bash", "-c",
-      "ncbin=\"$1\"; popup=\"$2\"; hist=\"$3\"\n" +
-      "if [[ -x $ncbin ]]; then\n" +
-      "  {\n" +
-      "    find \"$popup\" -maxdepth 1 -type f -name '*.json' -exec cat {} + 2>/dev/null\n" +
-      "    \"$ncbin\" list 30 2>/dev/null\n" +
-      "  } | jq -c -s '\n" +
-      "    (.[0:-1][]? // empty), (.[-1][]? // empty)\n" +
-      "    | select(.key or .timestamp or .id)\n" +
-      "  ' 2>/dev/null | jq -c -s '\n" +
-      "    unique_by(.key // (.timestamp|tostring))\n" +
+      "popup=\"$1\"; hist=\"$2\"\n" +
+      "files=()\n" +
+      "[[ -f \"$popup/live.json\" && -s \"$popup/live.json\" ]] && files+=(\"$popup/live.json\")\n" +
+      "[[ -f \"$popup/history.json\" && -s \"$popup/history.json\" ]] && files+=(\"$popup/history.json\")\n" +
+      "while IFS= read -r f; do\n" +
+      "  [[ -n \"$f\" && -s \"$f\" ]] && files+=(\"$f\")\n" +
+      "done < <(find \"$popup\" \"$hist\" -maxdepth 1 -type f -name '*.json' ! -name 'live.json' ! -name 'history.json' ! -name 'quiet.json' 2>/dev/null)\n" +
+      "if (( ${#files[@]} > 0 )); then\n" +
+      "  jq -c -s '\n" +
+      "    def to_entries:\n" +
+      "      if type == \"array\" then .[]\n" +
+      "      elif type == \"object\" then .\n" +
+      "      else empty\n" +
+      "      end;\n" +
+      "    [ .[]? | to_entries | select(.key or .id or .originalId or .ts or .timestamp) | .timestamp = (if .timestamp then .timestamp elif .ts then (.ts * 1000 | floor) else 0 end) ]\n" +
+      "    | unique_by(.key // (.timestamp|tostring))\n" +
       "    | sort_by(.timestamp)\n" +
       "    | reverse\n" +
       "    | .[0:30]\n" +
       "    | .[]\n" +
-      "  ' 2>/dev/null\n" +
-      "else\n" +
-      "  find \"$popup\" \"$hist\" -maxdepth 1 -type f -name '*.json' 2>/dev/null | while read -r f; do\n" +
-      "    cat \"$f\" 2>/dev/null; echo \"\"\n" +
-      "  done | jq -c -s '\n" +
-      "    map(select(.timestamp or .id))\n" +
-      "    | sort_by(.timestamp)\n" +
-      "    | reverse\n" +
-      "    | .[0:30]\n" +
-      "    | .[]\n" +
-      "  ' 2>/dev/null\n" +
+      "  ' \"${files[@]}\" 2>/dev/null\n" +
       "fi",
-      "--", ncBinPath, popupDir, historyDir]
+      "--", popupDir, historyDir]
     historyLoader.running = true
   }
 
@@ -110,7 +106,7 @@ Item {
       try {
         var entry = JSON.parse(line)
         var origId = Number(entry.originalId || entry.id || 0)
-        var stamp = Number(entry.timestamp || 0)
+        var stamp = Number(entry.timestamp || (entry.ts ? entry.ts * 1000 : 0) || 0)
         if (!stamp && entry.key) {
           stamp = Number(String(entry.key).split("-")[0] || 0)
         }
@@ -128,6 +124,11 @@ Item {
           }
         }
 
+        var argvStr = ""
+        if (entry.execArgv) {
+          argvStr = typeof entry.execArgv === "string" ? entry.execArgv : JSON.stringify(entry.execArgv)
+        }
+
         historyModel.append({
           key: key,
           id: origId,
@@ -141,6 +142,7 @@ Item {
           file: String(fileSrc || ""),
           glyph: String(entry.glyph || ""),
           exec: "",
+          execArgv: argvStr,
           urgency: Number(entry.urgency || 1),
           timestamp: stamp,
           day: dayOf(stamp)
@@ -162,9 +164,13 @@ Item {
     }
     Quickshell.execDetached(["bash", "-c",
       "ncbin=\"$1\"; popup=\"$2\"; hist=\"$3\"; unreadbin=\"$4\"\n" +
+      "omarchy-shell -q notifications clear >/dev/null 2>&1 || true\n" +
       "[[ -x $ncbin ]] && \"$ncbin\" clear >/dev/null 2>&1 || true\n" +
       "[[ -x $unreadbin ]] && \"$unreadbin\" mark-seen >/dev/null 2>&1 || true\n" +
-      "rm -f -- \"$popup\"/*.json \"$hist\"/*.json 2>/dev/null || true",
+      "rm -f -- \"$hist\"/*.json 2>/dev/null || true\n" +
+      "find \"$popup\" -maxdepth 1 -type f -name '*.json' ! -name 'live.json' ! -name 'history.json' ! -name 'quiet.json' -delete 2>/dev/null || true\n" +
+      "echo '[]' > \"$popup/history.json\" 2>/dev/null || true\n" +
+      "echo '[]' > \"$popup/live.json\" 2>/dev/null || true",
       "--", ncBinPath, popupDir, historyDir, unreadBinPath])
 
     historyModel.clear()
@@ -238,11 +244,38 @@ Item {
     Quickshell.execDetached(["bash", "-c",
       "ncbin=\"$1\"; popup=\"$2\"; hist=\"$3\"; key=\"$4\"; stem=\"$5\"\n" +
       "[[ -x $ncbin ]] && \"$ncbin\" remove \"$key\" >/dev/null 2>&1 || true\n" +
+      "for file in \"$popup/history.json\" \"$popup/live.json\"; do\n" +
+      "  if [[ -f \"$file\" ]]; then\n" +
+      "    tmp=$(mktemp \"${file}.XXXXXX\")\n" +
+      "    if jq --arg k \"$key\" 'if type == \"array\" then map(select(.key != $k)) else . end' \"$file\" > \"$tmp\" 2>/dev/null; then\n" +
+      "      mv -f \"$tmp\" \"$file\"\n" +
+      "    else\n" +
+      "      rm -f \"$tmp\"\n" +
+      "    fi\n" +
+      "  fi\n" +
+      "done\n" +
       "rm -f -- \"$popup/$stem.json\" \"$hist/$stem.json\" \"$popup/$key.json\" \"$hist/$key.json\" 2>/dev/null || true",
       "--", ncBinPath, popupDir, historyDir, key, stamp + "-" + origId])
 
     historyModel.remove(index)
     root.clampCursor()
+  }
+
+  function parseExecArgv(value) {
+    if (!value) return null
+    var parsed = null
+    if (Array.isArray(value)) parsed = value
+    else {
+      var text = String(value).trim()
+      if (!text || text.charAt(0) !== "[") return null
+      try { parsed = JSON.parse(text) } catch (_) { return null }
+    }
+    if (!Array.isArray(parsed) || parsed.length === 0) return null
+    for (var i = 0; i < parsed.length; i++) {
+      if (typeof parsed[i] !== "string" || parsed[i].indexOf("\u0000") >= 0) return null
+    }
+    if (!parsed[0] || parsed[0].charAt(0) === "-") return null
+    return parsed
   }
 
   function openNotification(index) {
@@ -263,7 +296,16 @@ Item {
       return
     }
 
-    // 2. Otherwise focus or launch the application safely
+    // 2. If an execArgv command is available, execute it safely
+    var argv = root.parseExecArgv(entry.execArgv)
+    if (argv) {
+      Util.execArgv(argv)
+      dismissHistoryEntry(index)
+      notificationActivated()
+      return
+    }
+
+    // 3. Otherwise focus or launch the application safely
     if (isFocusableApp(entry.app)) {
       launchApp(entry.app)
       dismissHistoryEntry(index)
@@ -271,7 +313,7 @@ Item {
       return
     }
 
-    // 3. System / informational notifications (notify-send, omarchy-action without file, etc.):
+    // 4. System / informational notifications (notify-send, omarchy-action without file, etc.):
     // Clicking acknowledges and dismisses the notification, closing Glance
     dismissHistoryEntry(index)
     notificationActivated()
@@ -382,12 +424,62 @@ Item {
       notificationList.positionViewAtIndex(cursorIndex, ListView.Contain)
   }
 
+  readonly property int _appsRevision: DesktopEntries.applications ? DesktopEntries.applications.values.length : 0
+
+  function resolveEntryIcon(iconName) {
+    var value = String(iconName || "").trim()
+    if (!value) return ""
+    if (value.indexOf("file://") === 0 || value.indexOf("image://") === 0) return value
+    if (value.charAt(0) === "/") return Util.fileUrl(value)
+    return Quickshell.iconPath(value, true)
+  }
+
+  function resolveNotificationIcon(image, appIcon, app) {
+    var dummy = root._appsRevision
+
+    // 1. Direct image from notification
+    var img = String(image || "").trim()
+    if (img !== "") {
+      var imgPath = resolveEntryIcon(img)
+      if (imgPath) return imgPath
+    }
+
+    // 2. Explicit appIcon (e.g. "zen-browser")
+    var icon = String(appIcon || "").trim()
+    if (icon !== "") {
+      var iconPath = resolveEntryIcon(icon)
+      if (iconPath) return iconPath
+      try {
+        var entryFromIcon = DesktopEntries.heuristicLookup(icon)
+        if (entryFromIcon && entryFromIcon.icon) {
+          var p = resolveEntryIcon(entryFromIcon.icon)
+          if (p) return p
+        }
+      } catch (_) {}
+    }
+
+    // 3. Application name lookup (e.g. "ZapZap", "Zen", "Spotify")
+    var appName = String(app || "").trim()
+    if (appName !== "" && appName !== "notify-send" && appName !== "omarchy-action" && appName !== "System") {
+      var direct = resolveEntryIcon(appName) || resolveEntryIcon(appName.toLowerCase())
+      if (direct) return direct
+
+      try {
+        var de = DesktopEntries.heuristicLookup(appName)
+          || DesktopEntries.heuristicLookup(appName.toLowerCase())
+          || DesktopEntries.heuristicLookup(appName.toLowerCase().replace(/[^a-z0-9]+/g, ""))
+        if (de && de.icon) {
+          var dePath = resolveEntryIcon(de.icon)
+          if (dePath) return dePath
+        }
+      } catch (_) {}
+    }
+
+    return ""
+  }
+
   function iconSource(value) {
-    var icon = String(value || "")
-    if (icon === "") return ""
-    if (icon.indexOf("file://") === 0 || icon.indexOf("image://") === 0) return icon
-    if (icon.charAt(0) === "/") return Util.fileUrl(icon)
-    return Quickshell.iconPath(icon, true)
+    return resolveEntryIcon(value)
   }
 
   function readableBody(value) {
@@ -546,6 +638,7 @@ Item {
         required property string preview
         required property string file
         required property string glyph
+        required property string execArgv
         required property int urgency
         required property double timestamp
         required property int originalId
@@ -553,7 +646,14 @@ Item {
         readonly property bool opens: root.canOpen(card)
         readonly property bool selected: root.cursorActive && card.index === root.cursorIndex
         readonly property string bodyText: root.readableBody(body)
-        readonly property string resolvedIcon: root.iconSource(image !== "" ? image : appIcon)
+        readonly property string resolvedIcon: root.resolveNotificationIcon(card.image, card.appIcon, card.app)
+        readonly property string effectiveGlyph: {
+          if (card.glyph !== "") return card.glyph
+          if (card.summary.indexOf("Screen recording") !== -1 || root.isVideoFile(card.file)) return "󰻂"
+          if (card.summary.indexOf("Screenshot") !== -1 || root.isImageFile(card.file)) return "󰹑"
+          if (card.app === "notify-send" || card.app === "omarchy-action" || card.app === "" || card.app === "System") return "󰂚"
+          return ""
+        }
         readonly property bool unread: card.timestamp > root.readMark
 
         readonly property string previewSource: {
@@ -646,24 +746,24 @@ Item {
             Text {
               textFormat: Text.PlainText
               anchors.centerIn: parent
-              visible: !avatar.hasIcon && card.glyph === ""
-              text: (card.summary.indexOf("Screen recording") !== -1 || root.isVideoFile(card.file)) ? "󰻂" : root.appInitial(card.app)
+              visible: !avatar.hasIcon && card.effectiveGlyph !== ""
+              text: card.effectiveGlyph
               font.family: root.fontFamily
-              font.pixelSize: (card.summary.indexOf("Screen recording") !== -1 || root.isVideoFile(card.file)) ? Style.font.icon : Style.font.caption
-              font.bold: true
+              font.pixelSize: Style.font.icon
               color: root.foreground
-              opacity: 0.7
+              opacity: 0.85
             }
 
             Text {
               textFormat: Text.PlainText
               anchors.centerIn: parent
-              visible: !avatar.hasIcon && card.glyph !== ""
-              text: card.glyph
+              visible: !avatar.hasIcon && card.effectiveGlyph === ""
+              text: root.appInitial(card.app)
               font.family: root.fontFamily
-              font.pixelSize: Style.font.icon
+              font.pixelSize: Style.font.caption
+              font.bold: true
               color: root.foreground
-              opacity: 0.8
+              opacity: 0.7
             }
 
             Image {

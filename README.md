@@ -11,14 +11,25 @@ omarchy plugin add https://github.com/tiagovicente2/omarchy-glance.git --enable
 ```
 
 Glance takes the built-in clock's place. Disable or remove it and the stock
-clock comes back.
+clock comes back. Calendars need [caldir](#dependencies).
 
-Optional: keep calendars syncing in the background, even with the panel closed.
-This installs a systemd user timer that runs `caldir sync` every five minutes.
+## Features
 
-```bash
-~/.config/omarchy/plugins/omarchy-glance/install-helper.sh
-```
+- **Agenda**: the selected day's events, with a **Join** button on Google
+  Meet, Microsoft Teams and Zoom meetings shortly before they start
+- **Next up in the bar**: the clock announces the next event shortly before it
+  starts (15 minutes by default)
+- **Notifications**: your 30 most recent, grouped by day, with image and
+  screen-recording previews. Click one to run its action or focus its app, or
+  dismiss them one by one or all at once
+- **Unread dot** on the clock when something new arrives
+- **Calendar**: month grid with colored dots for days that have events and a
+  switchable week start
+- **Settings**: hide calendars, hide declined invitations, and show year or
+  life progress
+- **Keyboard**: `↑` `↓` move through notifications, `←` `→` or `[` `]` change
+  month, `t` jumps to today, `w` flips the week start
+- Follows the Omarchy theme and language (English and Brazilian Portuguese)
 
 ## Dependencies
 
@@ -40,26 +51,17 @@ Swap `caldir-provider-google` for `caldir-provider-icloud`,
 `-outlook` or `-caldav` as needed. [renCal](https://github.com/t4t5/rencal) also
 installs caldir's providers if you prefer a calendar app.
 
-## Features
+## Optional
 
-- **Calendar**: month grid with colored dots for days that have events and a
-  switchable week start
-- **Agenda**: the selected day's events, with a **Join** button on Google
-  Meet, Microsoft Teams and Zoom meetings shortly before they start
-- **Next up in the bar**: the clock announces the next event shortly before it
-  starts (15 minutes by default)
-- **Notifications**: your 30 most recent, grouped by day, with image and
-  screen-recording previews. Click one to run its action or focus its app, or
-  dismiss them one by one or all at once
-- **Unread dot** on the clock when something new arrives
-- **Settings**: hide calendars, hide declined invitations, and show year or
-  life progress
-- **Keyboard**: `↑` `↓` move through notifications, `←` `→` or `[` `]` change
-  month, `t` jumps to today, `w` flips the week start
-- Follows the Omarchy theme and language (English and Brazilian Portuguese)
+Keep calendars syncing in the background, even with the panel closed. This
+installs a systemd user timer that runs `caldir sync` every five minutes:
 
-Optional: open Glance with a key. This example takes `SUPER + V` from
-Omarchy's universal paste, so pick another key if you use that. Add to
+```bash
+~/.config/omarchy/plugins/omarchy-glance/install-helper.sh
+```
+
+Open Glance with a key. This example takes `SUPER + V` from Omarchy's
+universal paste, so pick another key if you use that. Add to
 `~/.config/hypr/bindings.lua`:
 
 ```lua
@@ -75,6 +77,13 @@ systemctl --user disable --now caldir-sync.timer 2>/dev/null
 rm -f ~/.config/systemd/user/caldir-sync.{service,timer}
 rm -rf ~/.local/state/omarchy-glance ~/.local/state/omarchy/calendar-events.json
 ```
+
+## How it works
+
+Glance only reads files: caldir's calendars and Omarchy's notification history.
+It never signs in to a calendar provider. See
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the data flow, files and
+known limitations.
 
 ## Credits
 

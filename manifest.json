@@ -78,5 +78,7 @@
   "omarchy": {
     "clonedFrom": "omarchy.clock"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "homepage": "https://github.com/tiagovicente2/omarchy-glance",
+  "repository": "https://github.com/tiagovicente2/omarchy-glance"
 }

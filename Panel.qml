@@ -3,6 +3,7 @@ import QtQuick.Layouts
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
@@ -24,6 +25,8 @@ Panel {
   moduleName: "omarchy.clock"
   ipcTarget: "omarchy.clock"
   manageIpc: false
+
+  Commons.Translations { id: strings; directory: Qt.resolvedUrl("i18n") }
 
   property var anchorItem: null
 
@@ -512,7 +515,7 @@ Panel {
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
               iconText: root.settingsOpen ? "󰅖" : "󰒓"
-              tooltipText: root.settingsOpen ? "Back to calendar" : "Settings"
+              tooltipText: root.settingsOpen ? strings.t("panel.backToCalendar") : strings.t("panel.settings")
               foreground: root.contentForeground
               fontFamily: root.contentFontFamily
               onClicked: root.settingsOpen = !root.settingsOpen
@@ -566,7 +569,7 @@ Panel {
 
               PanelToolTip {
                 visible: heroMouse.containsMouse
-                text: "Back to today"
+                text: strings.t("panel.backToToday")
                 fontFamily: root.contentFontFamily
               }
             }
@@ -614,7 +617,7 @@ Panel {
                 Text {
                   anchors.verticalCenter: parent.verticalCenter
                   width: parent.width - Style.space(70)
-                  text: root.upcomingEvent ? root.upcomingEvent.title : qsTr("Nothing else today")
+                  text: root.upcomingEvent ? root.upcomingEvent.title : strings.t("panel.nothingElseToday")
                   textFormat: Text.PlainText
                   color: root.upcomingEvent
                     ? root.contentForeground
@@ -641,7 +644,7 @@ Panel {
 
                 Text {
                   anchors.verticalCenter: parent.verticalCenter
-                  text: "BORN"
+                  text: strings.t("panel.born")
                   color: Qt.darker(root.contentForeground, 1.5)
                   font.family: root.contentFontFamily
                   font.pixelSize: Style.font.bodySmall
@@ -652,7 +655,7 @@ Panel {
                   id: bornField
                   width: Style.space(70)
                   anchors.verticalCenter: parent.verticalCenter
-                  placeholderText: "year"
+                  placeholderText: strings.t("panel.yearPlaceholder")
                   foreground: root.contentForeground
                   font.family: root.contentFontFamily
                   inputMethodHints: Qt.ImhDigitsOnly
@@ -664,7 +667,7 @@ Panel {
                   anchors.verticalCenter: parent.verticalCenter
                   anchors.verticalCenterOffset: 0
                   leftPadding: Style.space(6)
-                  text: "LIVE TO"
+                  text: strings.t("panel.liveTo")
                   color: Qt.darker(root.contentForeground, 1.5)
                   font.family: root.contentFontFamily
                   font.pixelSize: Style.font.bodySmall
@@ -751,7 +754,7 @@ Panel {
                 id: lifeLabel
                 anchors.left: parent.left
                 anchors.verticalCenter: parent.verticalCenter
-                text: "LIFE"
+                text: strings.t("panel.life")
                 color: Qt.darker(root.contentForeground, 1.5)
                 font.family: root.contentFontFamily
                 font.pixelSize: Style.font.bodySmall
@@ -801,7 +804,7 @@ Panel {
 
                 PanelToolTip {
                   visible: lifeMouse.containsMouse
-                  text: "Memento Mori"
+                  text: strings.t("panel.mementoMori")
                   fontFamily: root.contentFontFamily
                 }
               }
@@ -851,7 +854,7 @@ Panel {
 
                   Text {
                     anchors.centerIn: parent
-                    text: "W"
+                    text: strings.t("panel.weekHeading")
                     color: weekStartMouse.containsMouse
                       ? Style.hoverStateColor(root.contentForeground, Color.accent)
                       : Qt.darker(root.contentForeground, 1.9)
@@ -871,7 +874,7 @@ Panel {
 
                   PanelToolTip {
                     visible: weekStartMouse.containsMouse
-                    text: "Start weeks on " + root.nextWeekStartLabel
+                    text: strings.t("panel.startWeeksOn").arg(root.nextWeekStartLabel)
                     fontFamily: root.contentFontFamily
                   }
                 }
@@ -1045,7 +1048,7 @@ Panel {
                 anchors.leftMargin: -Style.space(8)
                 anchors.verticalCenter: parent.verticalCenter
                 iconText: "󰅁"
-                tooltipText: "Previous month"
+                tooltipText: strings.t("panel.previousMonth")
                 foreground: root.contentForeground
                 fontFamily: root.contentFontFamily
                 onClicked: root.moveMonth(-1)
@@ -1056,7 +1059,7 @@ Panel {
                 anchors.rightMargin: -Style.space(8)
                 anchors.verticalCenter: parent.verticalCenter
                 iconText: "󰅂"
-                tooltipText: "Next month"
+                tooltipText: strings.t("panel.nextMonth")
                 foreground: root.contentForeground
                 fontFamily: root.contentFontFamily
                 onClicked: root.moveMonth(1)
@@ -1135,7 +1138,7 @@ Panel {
                   Text {
                     id: joinLabel
                     anchors.centerIn: parent
-                    text: qsTr("Join")
+                    text: strings.t("panel.join")
                     color: joinHover.hovered ? Color.background : Qt.darker(root.contentForeground, 1.4)
                     font.family: root.contentFontFamily
                     font.pixelSize: Style.font.caption
@@ -1162,9 +1165,9 @@ Panel {
                 Text {
                   width: Style.space(58)
                   text: eventRow.modelData.allDay
-                    ? qsTr("All day")
+                    ? strings.t("panel.allDay")
                     : eventRow.modelData.continuation
-                      ? qsTr("Ongoing")
+                      ? strings.t("panel.ongoing")
                       : root.labelLocale.toString(new Date(eventRow.modelData.start), "HH:mm")
                   color: Qt.darker(root.contentForeground, eventRow.declined ? 2.2 : 1.5)
                   font.family: root.contentFontFamily
@@ -1193,7 +1196,7 @@ Panel {
                   Text {
                     width: parent.width
                     visible: text !== ""
-                    text: eventRow.declined ? qsTr("Declined") : eventRow.modelData.location
+                    text: eventRow.declined ? strings.t("panel.declined") : eventRow.modelData.location
                     textFormat: Text.PlainText
                     color: Qt.darker(root.contentForeground, 1.9)
                     font.family: root.contentFontFamily
@@ -1218,14 +1221,14 @@ Panel {
               textFormat: Text.PlainText
 
               text: root.exportError !== ""
-                ? qsTr("Calendar export failed: %1").arg(root.exportError)
+                ? strings.t("panel.exportFailed").arg(root.exportError)
                 : root.syncState === "missing"
-                  ? qsTr("No Caldir events found. Install the caldir CLI and connect a calendar in renCal.")
+                  ? strings.t("panel.syncMissing")
                   : root.syncState === "version"
-                    ? qsTr("Events file was written by a newer version. Update the plugin.")
+                    ? strings.t("panel.syncVersion")
                     : root.syncState === "stale"
-                      ? qsTr("Calendar data is stale. Open renCal or run caldir sync.")
-                      : qsTr("Nothing scheduled")
+                      ? strings.t("panel.syncStale")
+                      : strings.t("panel.nothingScheduled")
             }
 
           }

@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 // The calendar's settings page, shown in place of the month grid.
@@ -10,6 +11,8 @@ import qs.Ui
 // shell.json itself.
 Column {
   id: root
+
+  Commons.Translations { id: strings; directory: Qt.resolvedUrl("i18n") }
 
   property color foreground: "white"
   property string fontFamily: ""
@@ -128,12 +131,12 @@ Column {
 
   // ---- Calendars
 
-  SectionTitle { text: qsTr("CALENDARS") }
+  SectionTitle { text: strings.t("settings.calendars") }
 
   Text {
     width: parent.width
     visible: root.calendars.length === 0
-    text: qsTr("Nothing synced yet, so there is nothing to choose from.")
+    text: strings.t("settings.noCalendars")
     color: root.faint
     font.family: root.fontFamily
     font.pixelSize: Style.font.caption
@@ -155,11 +158,11 @@ Column {
 
   // ---- Display
 
-  SectionTitle { text: qsTr("DISPLAY") }
+  SectionTitle { text: strings.t("settings.display") }
 
   ToggleRow {
-    label: qsTr("Week starts on Monday")
-    hint: qsTr("Off starts the week on Sunday")
+    label: strings.t("settings.weekStartsMonday")
+    hint: strings.t("settings.weekStartsMondayHint")
     checked: root.weekStartsMonday
     onActivated: root.weekStartToggled()
   }
@@ -167,26 +170,26 @@ Column {
   ToggleRow {
     // Every row on this page reads "checked means shown". Phrasing this one as
     // "Hide ..." inverted that and made the page contradict itself.
-    label: qsTr("Declined invitations")
-    hint: qsTr("Shown struck through when on")
+    label: strings.t("settings.declinedInvitations")
+    hint: strings.t("settings.declinedInvitationsHint")
     checked: !root.hideDeclined
     onActivated: root.hideDeclinedToggled()
   }
 
   ToggleRow {
-    label: qsTr("Year and life progress")
-    hint: qsTr("The upstream clock's bars, off by default")
+    label: strings.t("settings.yearLifeProgress")
+    hint: strings.t("settings.yearLifeProgressHint")
     checked: root.showYearProgress
     onActivated: root.yearProgressToggled()
   }
 
   // ---- Bar
 
-  SectionTitle { text: qsTr("BAR LABEL") }
+  SectionTitle { text: strings.t("settings.barLabel") }
 
   Text {
     width: parent.width
-    text: qsTr("How early the bar gives up the clock to announce what is next.")
+    text: strings.t("settings.barLabelHint")
     color: root.faint
     font.family: root.fontFamily
     font.pixelSize: Style.font.caption
@@ -216,7 +219,7 @@ Column {
         Text {
           id: leadLabel
           anchors.centerIn: parent
-          text: modelData === 0 ? qsTr("Never") : modelData + qsTr("min")
+          text: modelData === 0 ? strings.t("settings.never") : strings.t("settings.leadMinutes").arg(Commons.I18n.formatNumber(modelData))
           color: active ? root.foreground : root.faint
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
@@ -230,7 +233,7 @@ Column {
   // ---- Sync status. renCal owns providers and OAuth; Glance only reads the
   //      local Caldir export produced by the bundled adapter.
 
-  SectionTitle { text: qsTr("SYNC") }
+  SectionTitle { text: strings.t("settings.sync") }
 
   Text {
     width: parent.width
@@ -241,13 +244,15 @@ Column {
     textFormat: Text.PlainText
 
     text: {
-      if (root.exportError !== "") return qsTr("Calendar export failed:\n%1").arg(root.exportError)
-      if (root.syncState === "missing") return qsTr("No Caldir events found. Connect a calendar in renCal.")
-      if (root.syncState === "version") return qsTr("The events file was written by a newer version of this plugin.")
+      if (root.exportError !== "") return strings.t("settings.exportFailed").arg(root.exportError)
+      if (root.syncState === "missing") return strings.t("settings.syncMissing")
+      if (root.syncState === "version") return strings.t("settings.syncVersion")
 
-      var line = root.eventCount + qsTr(" event rows from ") + root.sourceLabel
-      if (root.syncState === "stale") return line + qsTr("\nData is stale. Open renCal or run caldir sync.")
-      return line + qsTr("\nLast export ") + root.syncedAt
+      var line = strings.tn("settings.eventRows", root.eventCount)
+        .arg(Commons.I18n.formatNumber(root.eventCount))
+        .arg(root.sourceLabel)
+      if (root.syncState === "stale") return line + "\n" + strings.t("settings.syncStale")
+      return line + "\n" + strings.t("settings.lastExport").arg(root.syncedAt)
     }
   }
 }

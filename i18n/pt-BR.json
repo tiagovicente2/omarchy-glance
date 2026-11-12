@@ -20,9 +20,10 @@
   "panel.ongoing": "Em andamento",
   "panel.declined": "Recusado",
   "panel.exportFailed": "Falha ao exportar o calendário: %1",
+  "panel.pullFailed": "Falha ao sincronizar o calendário: %1",
   "panel.syncMissing": "Nenhum evento encontrado. Instale o caldir e execute caldir connect.",
   "panel.syncVersion": "O arquivo de eventos foi gravado por uma versão mais nova. Atualize o plugin.",
-  "panel.syncStale": "Os dados do calendário estão desatualizados. Execute caldir sync.",
+  "panel.syncStale": "Os dados do calendário estão desatualizados. Ative Sincronizar calendários nas Configurações ou execute caldir pull.",
   "panel.nothingScheduled": "Nada agendado",
 
   "notifications.title": "Notificações recentes",
@@ -49,10 +50,13 @@
   "settings.never": "Nunca",
   "settings.leadMinutes": "%1 min",
   "settings.sync": "SINCRONIZAÇÃO",
+  "settings.syncCalendars": "Sincronizar calendários",
+  "settings.syncCalendarsHint": "Executa caldir pull a cada cinco minutos enquanto o Omarchy está aberto",
   "settings.exportFailed": "Falha ao exportar o calendário:\n%1",
+  "settings.pullFailed": "Falha ao sincronizar o calendário:\n%1",
   "settings.syncMissing": "Nenhum evento encontrado. Execute caldir connect.",
   "settings.syncVersion": "O arquivo de eventos foi gravado por uma versão mais nova deste plugin.",
   "settings.eventRows": { "one": "%1 linha de evento de %2", "many": "%1 de linhas de evento de %2", "other": "%1 linhas de evento de %2" },
-  "settings.syncStale": "Os dados estão desatualizados. Execute caldir sync.",
+  "settings.syncStale": "Os dados estão desatualizados. Ative Sincronizar calendários acima ou execute caldir pull.",
   "settings.lastExport": "Última exportação: %1"
 }

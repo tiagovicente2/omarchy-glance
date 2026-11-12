@@ -87,15 +87,20 @@ Panel {
   property var eventIndex: ({})
   property bool eventVersionMismatch: false
 
-  // Matches the sync timer's interval. Model.syncState allows four of these
+  // Matches Glance's own refresh. Model.syncState allows four of these
   // to elapse before calling the file stale, so one missed run stays quiet.
   readonly property int syncIntervalSeconds: 300
+
+  // On: each refresh runs `caldir pull` first, so new events arrive without
+  // anything else running. Read-only: Glance never pushes calendar changes.
+  readonly property bool syncCalendars: setting("syncCalendars", true)
 
   // The adapter reads the local Caldir through the official caldir CLI.
   // It is bundled with the plugin and runs without owning provider credentials.
   readonly property string exporterPath: Model.commandPathFromUrl(
     Qt.resolvedUrl("sync/caldir-export"), "")
   property string exportError: ""
+  property bool pullFailed: false
   property bool exportPending: false
   readonly property string syncState: eventVersionMismatch
     ? "version"
@@ -196,6 +201,12 @@ Panel {
 
   function toggleHideDeclined() {
     persistSettings({ hideDeclined: !root.hideDeclined })
+  }
+
+  function toggleSyncCalendars() {
+    var next = !root.syncCalendars
+    persistSettings({ syncCalendars: next })
+    if (next) Qt.callLater(root.exportEvents)
   }
 
   // Qt.openUrlExternally rather than the shell helper on purpose. That helper
@@ -402,18 +413,22 @@ Panel {
       return
     }
     root.exportError = ""
+    caldirExporter.command = root.syncCalendars
+      ? [root.exporterPath, "--pull"]
+      : [root.exporterPath]
     caldirExporter.running = true
   }
 
   Process {
     id: caldirExporter
-    command: [root.exporterPath]
     running: false
     stderr: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.exportError = text.trim()
+      onStreamFinished: root.exportError = text.trim().replace(/^caldir pull failed: /, "")
     }
     onExited: function(exitCode) {
+      // 2: the pull failed but the export of what is on disk succeeded.
+      root.pullFailed = exitCode === 2
       if (exitCode === 0) root.exportError = ""
       if (!root.exportPending) return
       root.exportPending = false
@@ -1221,7 +1236,7 @@ Panel {
               textFormat: Text.PlainText
 
               text: root.exportError !== ""
-                ? strings.t("panel.exportFailed").arg(root.exportError)
+                ? strings.t(root.pullFailed ? "panel.pullFailed" : "panel.exportFailed").arg(root.exportError)
                 : root.syncState === "missing"
                   ? strings.t("panel.syncMissing")
                   : root.syncState === "version"
@@ -1248,11 +1263,13 @@ Panel {
             hiddenCalendars: root.hiddenCalendars
             showYearProgress: root.showYearProgress
             hideDeclined: root.hideDeclined
+            syncCalendars: root.syncCalendars
             weekStartsMonday: root.weekStart === 1
             announceLeadMinutes: root.setting("announceLeadMinutes", 15)
 
             syncState: root.syncState
             exportError: root.exportError
+            pullFailed: root.pullFailed
             eventCount: root.eventDoc && root.eventDoc.events ? root.eventDoc.events.length : 0
             sourceLabel: root.eventDoc ? String(root.eventDoc.source || "") : ""
             syncedAt: root.eventDoc && root.eventDoc.syncedAt
@@ -1262,6 +1279,7 @@ Panel {
             onCalendarToggled: function(calendarId) { root.toggleCalendar(calendarId) }
             onYearProgressToggled: root.toggleYearProgress()
             onHideDeclinedToggled: root.toggleHideDeclined()
+            onSyncCalendarsToggled: root.toggleSyncCalendars()
             onWeekStartToggled: root.toggleWeekStart()
             onLeadMinutesPicked: function(minutes) { root.setAnnounceLeadMinutes(minutes) }
           }

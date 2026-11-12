@@ -20,9 +20,10 @@
   "panel.ongoing": "Ongoing",
   "panel.declined": "Declined",
   "panel.exportFailed": "Calendar export failed: %1",
+  "panel.pullFailed": "Calendar sync failed: %1",
   "panel.syncMissing": "No calendar events found. Install caldir and run caldir connect.",
   "panel.syncVersion": "Events file was written by a newer version. Update the plugin.",
-  "panel.syncStale": "Calendar data is stale. Run caldir sync.",
+  "panel.syncStale": "Calendar data is stale. Turn on Sync calendars in Settings, or run caldir pull.",
   "panel.nothingScheduled": "Nothing scheduled",
 
   "notifications.title": "Recent notifications",
@@ -49,10 +50,13 @@
   "settings.never": "Never",
   "settings.leadMinutes": "%1min",
   "settings.sync": "SYNC",
+  "settings.syncCalendars": "Sync calendars",
+  "settings.syncCalendarsHint": "Runs caldir pull every five minutes while Omarchy is running",
   "settings.exportFailed": "Calendar export failed:\n%1",
+  "settings.pullFailed": "Calendar sync failed:\n%1",
   "settings.syncMissing": "No calendar events found. Run caldir connect.",
   "settings.syncVersion": "The events file was written by a newer version of this plugin.",
   "settings.eventRows": { "one": "%1 event row from %2", "other": "%1 event rows from %2" },
-  "settings.syncStale": "Data is stale. Run caldir sync.",
+  "settings.syncStale": "Data is stale. Turn on Sync calendars above, or run caldir pull.",
   "settings.lastExport": "Last export %1"
 }

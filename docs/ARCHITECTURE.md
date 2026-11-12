@@ -10,7 +10,7 @@ provider sign-in and sync, and keeps every calendar as standard RFC 5545 files
 on disk. Glance only reads them:
 
 ```text
-provider ─ caldir sync ─▶ ~/caldir/<calendar>/*.ics
+provider ─ caldir pull ─▶ ~/caldir/<calendar>/*.ics
                           │
                           ├─ caldir --json events      (recurrence, timezones)
                           └─ URL / CONFERENCE lookup    (meeting links)
@@ -24,6 +24,7 @@ provider ─ caldir sync ─▶ ~/caldir/<calendar>/*.ics
 
 `sync/caldir-export` (a stdlib-only Python script, `sync/caldir_export.py`):
 
+- optionally runs `caldir pull` (see below)
 - reads the Caldir folder from `${XDG_CONFIG_HOME:-~/.config}/caldir/config.toml`
 - runs `caldir --json events` for the last 7 and next 60 days, so Caldir
   expands recurrences and timezone overrides
@@ -32,8 +33,15 @@ provider ─ caldir sync ─▶ ~/caldir/<calendar>/*.ics
   at once
 
 It runs when the shell starts, when the panel opens, and every five minutes.
-The optional `caldir-sync.timer` (installed by `install-helper.sh`) also runs
-`caldir sync` first, so new events arrive even when the panel stays closed.
+
+With **Sync calendars** on (the default, stored as `syncCalendars` in
+`shell.json`), it first runs `caldir pull` to fetch remote changes. Glance only
+pulls and never pushes, so it cannot change your calendars. caldir finds its
+providers on `PATH`, so the exporter adds `~/.local/bin`, `~/.cargo/bin` and
+renCal's provider folder (`/usr/lib/renCal/providers`) when they exist. If the
+pull fails, the exporter still exports what is on disk and exits with status 2,
+and the panel shows "Calendar sync failed". Sync only runs while the Omarchy
+shell is running.
 
 ### Meeting links
 
@@ -75,7 +83,6 @@ writes. It does not replace that service.
 | `Model.js` | Date, event and meeting-link logic |
 | `sync/` | Caldir exporter |
 | `bin/` | Unread counter and thumbnail helper |
-| `setup/` | Optional background sync timer |
 | `i18n/` | Translations |
 
 ## Known limitations

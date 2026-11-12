@@ -22,7 +22,8 @@
       "verticalFormat": "HH\n—\nmm",
       "announceLeadMinutes": 15,
       "showYearProgress": false,
-      "hideDeclined": false
+      "hideDeclined": false,
+      "syncCalendars": true
     },
     "schema": [
       {
@@ -60,6 +61,12 @@
         "type": "boolean",
         "label": "Hide declined invitations",
         "defaultValue": false
+      },
+      {
+        "key": "syncCalendars",
+        "type": "boolean",
+        "label": "Sync calendars (runs caldir pull every five minutes)",
+        "defaultValue": true
       },
       {
         "key": "birthYear",

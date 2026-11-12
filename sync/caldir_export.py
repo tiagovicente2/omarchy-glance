@@ -55,6 +55,40 @@ def default_caldir_binary() -> str:
     return shutil.which("caldir") or (str(local) if local.is_file() else "caldir")
 
 
+# caldir finds its providers (caldir-provider-google, ...) on PATH. The shell
+# that runs Glance may not have ~/.local/bin on PATH, and renCal installs its
+# providers in its own folder, so both are added when they exist.
+PROVIDER_DIRS = (
+    Path("~/.local/bin").expanduser(),
+    Path("~/.cargo/bin").expanduser(),
+    Path("/usr/lib/renCal/providers"),
+)
+PULL_TIMEOUT_SECONDS = 120
+
+
+def provider_environment() -> dict[str, str]:
+    env = dict(os.environ)
+    current = [part for part in env.get("PATH", "").split(os.pathsep) if part]
+    extra = [str(path) for path in PROVIDER_DIRS if path.is_dir() and str(path) not in current]
+    env["PATH"] = os.pathsep.join(current + extra) if current else os.pathsep.join(extra + ["/usr/bin", "/bin"])
+    return env
+
+
+def pull_calendars(binary: str) -> None:
+    """Fetch remote changes into the local caldir. Read-only: never pushes."""
+    result = subprocess.run(
+        [binary, "pull"],
+        capture_output=True,
+        text=True,
+        timeout=PULL_TIMEOUT_SECONDS,
+        env=provider_environment(),
+        stdin=subprocess.DEVNULL,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip().splitlines()
+        raise ValueError(detail[-1][:200] if detail else f"exit status {result.returncode}")
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     today = date.today()
     parser = argparse.ArgumentParser(description=__doc__)
@@ -62,6 +96,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--from", dest="from_date", default=(today - timedelta(days=DEFAULT_PAST_DAYS)).isoformat())
     parser.add_argument("--to", dest="to_date", default=(today + timedelta(days=DEFAULT_FUTURE_DAYS)).isoformat())
+    parser.add_argument("--pull", action="store_true", help="run caldir pull before exporting")
     return parser.parse_args(argv)
 
 
@@ -337,6 +372,8 @@ def run_caldir(binary: str, from_date: str, to_date: str) -> list[dict[str, Any]
         capture_output=True,
         text=True,
         timeout=60,
+        env=provider_environment(),
+        stdin=subprocess.DEVNULL,
     )
     parsed = json.loads(result.stdout)
     if not isinstance(parsed, list):
@@ -431,15 +468,25 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         config_path = default_config_path().resolve()
         root = configured_caldir(config_path)
-        metadata = calendar_metadata(root)
-        meeting_urls = ics_meeting_urls(root)
         from_date = date.fromisoformat(args.from_date)
         to_date = date.fromisoformat(args.to_date)
         if to_date < from_date:
             raise ValueError("--to must not be before --from")
+        pull_error = None
+        if args.pull:
+            try:
+                pull_calendars(args.caldir_bin)
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                # Still export what is on disk; report the pull failure after.
+                pull_error = error
+        metadata = calendar_metadata(root)
+        meeting_urls = ics_meeting_urls(root)
         raw = run_caldir(args.caldir_bin, args.from_date, args.to_date)
         document = build_document(raw, metadata, meeting_urls=meeting_urls, from_date=from_date, to_date=to_date)
         atomic_write(output, document)
+        if pull_error is not None:
+            print(f"caldir pull failed: {pull_error}", file=sys.stderr)
+            return 2
     except (OSError, ValueError, subprocess.SubprocessError, json.JSONDecodeError) as error:
         print(f"caldir export failed: {error}", file=sys.stderr)
         return 1

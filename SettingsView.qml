@@ -22,6 +22,7 @@ Column {
   property bool showYearProgress: false
   property bool weekStartsMonday: true
   property bool hideDeclined: false
+  property bool syncCalendars: true
   property int announceLeadMinutes: 15
 
   property string syncedAt: ""
@@ -29,11 +30,13 @@ Column {
   property int eventCount: 0
   property string syncState: "missing"
   property string exportError: ""
+  property bool pullFailed: false
 
   signal calendarToggled(string calendarId)
   signal yearProgressToggled()
   signal weekStartToggled()
   signal hideDeclinedToggled()
+  signal syncCalendarsToggled()
   signal leadMinutesPicked(int minutes)
 
   readonly property color muted: Qt.darker(foreground, 1.5)
@@ -235,6 +238,13 @@ Column {
 
   SectionTitle { text: strings.t("settings.sync") }
 
+  ToggleRow {
+    label: strings.t("settings.syncCalendars")
+    hint: strings.t("settings.syncCalendarsHint")
+    checked: root.syncCalendars
+    onActivated: root.syncCalendarsToggled()
+  }
+
   Text {
     width: parent.width
     color: root.faint
@@ -244,7 +254,8 @@ Column {
     textFormat: Text.PlainText
 
     text: {
-      if (root.exportError !== "") return strings.t("settings.exportFailed").arg(root.exportError)
+      if (root.exportError !== "")
+        return strings.t(root.pullFailed ? "settings.pullFailed" : "settings.exportFailed").arg(root.exportError)
       if (root.syncState === "missing") return strings.t("settings.syncMissing")
       if (root.syncState === "version") return strings.t("settings.syncVersion")
 

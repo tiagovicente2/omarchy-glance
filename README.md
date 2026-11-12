@@ -11,7 +11,8 @@ omarchy plugin add https://github.com/tiagovicente2/omarchy-glance.git --enable
 ```
 
 Glance takes the built-in clock's place. Disable or remove it and the stock
-clock comes back. Calendars need [caldir](#dependencies).
+clock comes back. Calendars need [caldir](#dependencies); once it is
+connected, Glance pulls new events every five minutes on its own.
 
 ## Features
 
@@ -25,6 +26,8 @@ clock comes back. Calendars need [caldir](#dependencies).
 - **Unread dot** on the clock when something new arrives
 - **Calendar**: month grid with colored dots for days that have events and a
   switchable week start
+- **Calendar sync**: runs `caldir pull` every five minutes while Omarchy is
+  running. Read-only, and switchable in Settings
 - **Settings**: hide calendars, hide declined invitations, and show year or
   life progress
 - **Keyboard**: `↑` `↓` move through notifications, `←` `→` or `[` `]` change
@@ -51,16 +54,9 @@ Swap `caldir-provider-google` for `caldir-provider-icloud`,
 `-outlook` or `-caldav` as needed. [renCal](https://github.com/t4t5/rencal) also
 installs caldir's providers if you prefer a calendar app.
 
-## Optional
+## Keybinding
 
-Keep calendars syncing in the background, even with the panel closed. This
-installs a systemd user timer that runs `caldir sync` every five minutes:
-
-```bash
-~/.config/omarchy/plugins/omarchy-glance/install-helper.sh
-```
-
-Open Glance with a key. This example takes `SUPER + V` from Omarchy's
+Optional: open Glance with a key. This example takes `SUPER + V` from Omarchy's
 universal paste, so pick another key if you use that. Add to
 `~/.config/hypr/bindings.lua`:
 
@@ -73,8 +69,6 @@ o.bind("SUPER + V", "Glance", "omarchy-shell shell toggle omarchy.clock")
 
 ```bash
 omarchy plugin remove omarchy-glance
-systemctl --user disable --now caldir-sync.timer 2>/dev/null
-rm -f ~/.config/systemd/user/caldir-sync.{service,timer}
 rm -rf ~/.local/state/omarchy-glance ~/.local/state/omarchy/calendar-events.json
 ```
 

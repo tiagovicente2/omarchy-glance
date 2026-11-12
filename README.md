@@ -46,6 +46,9 @@ expand recurrence, read descriptions, read provider credentials, or modify
 - [renCal](https://github.com/t4t5/rencal) configured with at least one calendar
 - [Caldir](https://github.com/t4t5/caldir) CLI with JSON event output
 - Python 3.11 or newer (`tomllib` is used by the stdlib-only adapter)
+- Optional: `ffmpegthumbnailer` or `ffmpeg` for screen-recording thumbnails in
+  the notification list (both ship with Omarchy). Without them, video
+  notifications show a film icon instead.
 
 Glance needs `caldir --json events`, which landed after the v0.11.1 release.
 Install the official source build, pinned to the v0.14.10 commit:
@@ -114,8 +117,8 @@ Remove the plugin:
 omarchy plugin remove omarchy-glance
 ```
 
-Optionally delete Glance's local state (the notification seen marker and the
-exported calendar view):
+Optionally delete Glance's local state (the notification seen marker, cached
+video thumbnails, and the exported calendar view):
 
 ```bash
 rm -rf "${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-glance"
@@ -155,6 +158,10 @@ jq '.source, (.events | length)' ~/.local/state/omarchy/calendar-events.json
   [tmn73/omarchy-calendar](https://github.com/tmn73/omarchy-calendar) (MIT)
 - Clock/calendar base derived from
   [Omarchy](https://github.com/basecamp/omarchy) (MIT)
+- Notification history helpers (day grouping, icon resolution, markup
+  stripping, unread watcher) adapted from
+  [jankeesvw/omarchy-notification-center](https://github.com/jankeesvw/omarchy-notification-center)
+  (MIT)
 - Calendar data and recurrence expansion provided by
   [renCal](https://github.com/t4t5/rencal) and
   [Caldir](https://github.com/t4t5/caldir)

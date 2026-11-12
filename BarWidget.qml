@@ -2,6 +2,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
@@ -13,6 +14,8 @@ import "Model.js" as Model
 BarWidget {
   id: root
   moduleName: "omarchy.clock"
+
+  Commons.Translations { id: strings; directory: Qt.resolvedUrl("i18n") }
 
   property date displayDate: clock.date
 
@@ -257,8 +260,8 @@ BarWidget {
     horizontalMargin: root.unreadCount > 0 && !root.vertical ? 18 : 8.75
     verticalPadding: 8.75
     tooltipText: root.unreadCount > 0
-      ? (root.unreadCount === 1 ? "1 new notification" : (root.unreadCount + " new notifications"))
-      : "Right-click to toggle format"
+      ? strings.tn("bar.newNotifications", root.unreadCount).arg(Commons.I18n.formatNumber(root.unreadCount))
+      : strings.t("bar.toggleFormatHint")
 
     onPressed: function(b) {
       if (b === Qt.RightButton) root.cycleFormat()

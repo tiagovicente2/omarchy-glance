@@ -5,10 +5,13 @@ import QtQuick.Effects
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 Item {
   id: root
+
+  Commons.Translations { id: strings; directory: Qt.resolvedUrl("i18n") }
 
   property var bar: null
   property var notificationService: null
@@ -491,12 +494,12 @@ Item {
   }
 
   function dayOf(timestamp) {
-    if (!timestamp || timestamp <= 0) return "Earlier"
+    if (!timestamp || timestamp <= 0) return strings.t("notifications.earlier")
     var when = new Date(timestamp)
     var now = new Date(root.nowMs)
     var midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
-    if (timestamp >= midnight) return "Today"
-    if (timestamp >= midnight - 86400000) return "Yesterday"
+    if (timestamp >= midnight) return strings.t("notifications.today")
+    if (timestamp >= midnight - 86400000) return strings.t("notifications.yesterday")
     if (timestamp >= midnight - 6 * 86400000) return Qt.formatDateTime(when, "dddd")
     if (when.getFullYear() === now.getFullYear()) return Qt.formatDateTime(when, "d MMMM")
     return Qt.formatDateTime(when, "d MMMM yyyy")
@@ -506,8 +509,8 @@ Item {
     var stamp = Number(timestamp || 0)
     if (!isFinite(stamp) || stamp <= 0) return ""
     var age = Math.max(0, root.nowMs - stamp)
-    if (age < 60000) return "now"
-    if (age < 3600000) return Math.round(age / 60000) + "m ago"
+    if (age < 60000) return strings.t("notifications.now")
+    if (age < 3600000) return strings.t("notifications.minutesAgo").arg(Commons.I18n.formatNumber(Math.round(age / 60000)))
     return Qt.formatDateTime(new Date(stamp), "HH:mm")
   }
 
@@ -544,7 +547,7 @@ Item {
 
       Text {
         Layout.fillWidth: true
-        text: "Recent notifications"
+        text: strings.t("notifications.title")
         color: root.foreground
         font.family: root.fontFamily
         font.pixelSize: Style.font.title
@@ -563,7 +566,7 @@ Item {
         Text {
           id: dismissLabel
           anchors.centerIn: parent
-          text: "Dismiss all"
+          text: strings.t("notifications.dismissAll")
           color: root.foreground
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
@@ -794,7 +797,7 @@ Item {
               Text {
                 textFormat: Text.PlainText
                 Layout.fillWidth: true
-                text: card.app !== "" ? card.app : "System"
+                text: card.app !== "" ? card.app : strings.t("notifications.system")
                 elide: Text.ElideRight
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
@@ -938,7 +941,7 @@ Item {
 
         Text {
           Layout.alignment: Qt.AlignHCenter
-          text: "No recent notifications"
+          text: strings.t("notifications.empty")
           color: root.dimForeground
           font.family: root.fontFamily
           font.pixelSize: Style.font.body

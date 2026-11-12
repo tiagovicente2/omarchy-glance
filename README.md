@@ -24,8 +24,8 @@ connected, Glance pulls new events every five minutes on its own.
   screen-recording previews. Click one to run its action or focus its app, or
   dismiss them one by one or all at once
 - **Unread dot** on the clock when something new arrives
-- **Calendar**: month grid with colored dots for days that have events and a
-  switchable week start
+- **Calendar**: month grid with ISO week numbers, colored dots for days that
+  have events, and a switchable week start
 - **Calendar sync**: runs `caldir pull` every five minutes while Omarchy is
   running. Read-only, and switchable in Settings
 - **Settings**: hide calendars, hide declined invitations, and show year or

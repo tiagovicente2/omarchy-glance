@@ -497,9 +497,10 @@ Item {
     var midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
     if (timestamp >= midnight) return "Today"
     if (timestamp >= midnight - 86400000) return "Yesterday"
-    if (timestamp >= midnight - 6 * 86400000) return Qt.formatDateTime(when, "dddd")
-    if (when.getFullYear() === now.getFullYear()) return Qt.formatDateTime(when, "d MMMM")
-    return Qt.formatDateTime(when, "d MMMM yyyy")
+    var locale = Qt.locale(I18n.formatLocale)
+    if (timestamp >= midnight - 6 * 86400000) return locale.toString(when, "dddd")
+    if (when.getFullYear() === now.getFullYear()) return locale.toString(when, "d MMMM")
+    return locale.toString(when, "d MMMM yyyy")
   }
 
   function timeLabel(timestamp) {
@@ -508,7 +509,14 @@ Item {
     var age = Math.max(0, root.nowMs - stamp)
     if (age < 60000) return "now"
     if (age < 3600000) return Math.round(age / 60000) + "m ago"
-    return Qt.formatDateTime(new Date(stamp), "HH:mm")
+    return Qt.locale(I18n.formatLocale).toString(new Date(stamp), "HH:mm")
+  }
+
+  // Day sections are stored in the model when history loads, so rebuild them
+  // when the Omarchy language changes.
+  Connections {
+    target: I18n
+    function onFormatLocaleChanged() { root.reload() }
   }
 
   Timer {

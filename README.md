@@ -47,11 +47,12 @@ expand recurrence, read descriptions, read provider credentials, or modify
 - [Caldir](https://github.com/t4t5/caldir) CLI with JSON event output
 - Python 3.11 or newer (`tomllib` is used by the stdlib-only adapter)
 
-At the time of writing, `caldir --json events` is on Caldir `main` after the
-v0.11.1 release. Install that official source build with:
+Glance needs `caldir --json events`, which landed after the v0.11.1 release.
+Install the official source build, pinned to the v0.14.10 commit:
 
 ```bash
 cargo install --git https://github.com/t4t5/caldir.git \
+  --rev d19547fe02a3635a7281828e32556363cd2fdd8c \
   caldir-cli --bin caldir --root "$HOME/.local" --force
 ```
 
@@ -66,26 +67,19 @@ caldir --json events --from "$(date -I)" --to "$(date -I -d '+30 days')" | jq
 
 ```bash
 omarchy plugin add https://github.com/tiagovicente2/omarchy-glance.git --enable
-~/.config/omarchy/plugins/omarchy-glance/setup/center-anchor
-~/.config/omarchy/plugins/omarchy-glance/setup/sync-timer
-jq -e '.bar.centerAnchor == "omarchy-glance"' ~/.config/omarchy/shell.json
-```
-
-The helper changes only `bar.centerAnchor` and atomically preserves every
-other `shell.json` setting. It refuses malformed JSON rather than replacing
-it. With a custom `XDG_CONFIG_HOME`, use the corresponding plugin and config
-paths.
-
-To run both setup steps with one command, use the bundled `install-helper.sh`
-instead of calling `setup/center-anchor` and `setup/sync-timer` separately:
-
-```bash
-omarchy plugin add https://github.com/tiagovicente2/omarchy-glance.git --enable
 ~/.config/omarchy/plugins/omarchy-glance/install-helper.sh
 ```
 
-It runs `setup/center-anchor` and then `setup/sync-timer`, skipping either one
-if it is not executable.
+Glance is a clone of the built-in clock (`clonedFrom: omarchy.clock`), so
+enabling it takes the clock's place in the bar and disabling or removing it
+brings the stock clock back. It does not edit `shell.json` itself.
+
+`install-helper.sh` runs `setup/sync-timer`, which copies
+`caldir-sync.service` and `caldir-sync.timer` into
+`${XDG_CONFIG_HOME:-~/.config}/systemd/user/` and enables the timer to run
+`caldir sync` plus the Glance export every five minutes. Skip it if you only
+want Glance's built-in refresh (on shell startup, on panel open, and every
+five minutes while the shell runs).
 
 Connect and sync providers in renCal. Glance automatically reads the same
 Caldir configured by renCal; no additional OAuth or Google Cloud setup exists.
@@ -131,12 +125,9 @@ rm -f ~/.local/state/omarchy/calendar-events.json
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -v
-node --test tests/model.test.js
 qmllint -I /usr/share/omarchy/shell Panel.qml NotificationHistory.qml SettingsView.qml
 omarchy plugin validate .
 git diff --check
-jq -e '.bar.centerAnchor == "omarchy-glance"' "${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/shell.json"
 ```
 
 Run the adapter directly:

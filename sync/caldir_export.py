@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export renCal/Caldir events to Omarchy Glance's JSON contract."""
+"""Export Caldir events to Omarchy Glance's JSON contract."""
 
 from __future__ import annotations
 

@@ -91,7 +91,7 @@ Panel {
   // to elapse before calling the file stale, so one missed run stays quiet.
   readonly property int syncIntervalSeconds: 300
 
-  // The adapter reads renCal's local Caldir through the official caldir CLI.
+  // The adapter reads the local Caldir through the official caldir CLI.
   // It is bundled with the plugin and runs without owning provider credentials.
   readonly property string exporterPath: Model.commandPathFromUrl(
     Qt.resolvedUrl("sync/caldir-export"), "")

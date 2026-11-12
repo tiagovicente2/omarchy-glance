@@ -20,9 +20,9 @@
   "panel.ongoing": "Ongoing",
   "panel.declined": "Declined",
   "panel.exportFailed": "Calendar export failed: %1",
-  "panel.syncMissing": "No Caldir events found. Install the caldir CLI and connect a calendar in renCal.",
+  "panel.syncMissing": "No calendar events found. Install caldir and run caldir connect.",
   "panel.syncVersion": "Events file was written by a newer version. Update the plugin.",
-  "panel.syncStale": "Calendar data is stale. Open renCal or run caldir sync.",
+  "panel.syncStale": "Calendar data is stale. Run caldir sync.",
   "panel.nothingScheduled": "Nothing scheduled",
 
   "notifications.title": "Recent notifications",
@@ -50,9 +50,9 @@
   "settings.leadMinutes": "%1min",
   "settings.sync": "SYNC",
   "settings.exportFailed": "Calendar export failed:\n%1",
-  "settings.syncMissing": "No Caldir events found. Connect a calendar in renCal.",
+  "settings.syncMissing": "No calendar events found. Run caldir connect.",
   "settings.syncVersion": "The events file was written by a newer version of this plugin.",
   "settings.eventRows": { "one": "%1 event row from %2", "other": "%1 event rows from %2" },
-  "settings.syncStale": "Data is stale. Open renCal or run caldir sync.",
+  "settings.syncStale": "Data is stale. Run caldir sync.",
   "settings.lastExport": "Last export %1"
 }

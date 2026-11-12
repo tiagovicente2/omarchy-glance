@@ -4,7 +4,7 @@
   "name": "Omarchy Glance",
   "version": "1.2.0",
   "author": "Tiago Vicente",
-  "description": "Centered calendar, Caldir agenda, and interactive notification history",
+  "description": "Your day at a glance: replaces the bar clock with a calendar, your caldir agenda with one-click Join, and recent notifications.",
   "kinds": [
     "bar-widget"
   ],
@@ -13,7 +13,7 @@
   },
   "barWidget": {
     "displayName": "Omarchy Glance",
-    "description": "Calendar, Caldir agenda, and recent notifications",
+    "description": "Clock with calendar, agenda and recent notifications",
     "category": "Time",
     "allowMultiple": false,
     "defaults": {

@@ -20,9 +20,9 @@
   "panel.ongoing": "Em andamento",
   "panel.declined": "Recusado",
   "panel.exportFailed": "Falha ao exportar o calendário: %1",
-  "panel.syncMissing": "Nenhum evento do Caldir encontrado. Instale a CLI do caldir e conecte um calendário no renCal.",
+  "panel.syncMissing": "Nenhum evento encontrado. Instale o caldir e execute caldir connect.",
   "panel.syncVersion": "O arquivo de eventos foi gravado por uma versão mais nova. Atualize o plugin.",
-  "panel.syncStale": "Os dados do calendário estão desatualizados. Abra o renCal ou execute caldir sync.",
+  "panel.syncStale": "Os dados do calendário estão desatualizados. Execute caldir sync.",
   "panel.nothingScheduled": "Nada agendado",
 
   "notifications.title": "Notificações recentes",
@@ -50,9 +50,9 @@
   "settings.leadMinutes": "%1 min",
   "settings.sync": "SINCRONIZAÇÃO",
   "settings.exportFailed": "Falha ao exportar o calendário:\n%1",
-  "settings.syncMissing": "Nenhum evento do Caldir encontrado. Conecte um calendário no renCal.",
+  "settings.syncMissing": "Nenhum evento encontrado. Execute caldir connect.",
   "settings.syncVersion": "O arquivo de eventos foi gravado por uma versão mais nova deste plugin.",
   "settings.eventRows": { "one": "%1 linha de evento de %2", "many": "%1 de linhas de evento de %2", "other": "%1 linhas de evento de %2" },
-  "settings.syncStale": "Os dados estão desatualizados. Abra o renCal ou execute caldir sync.",
+  "settings.syncStale": "Os dados estão desatualizados. Execute caldir sync.",
   "settings.lastExport": "Última exportação: %1"
 }

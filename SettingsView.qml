@@ -230,7 +230,7 @@ Column {
     }
   }
 
-  // ---- Sync status. renCal owns providers and OAuth; Glance only reads the
+  // ---- Sync status. Caldir owns providers and OAuth; Glance only reads the
   //      local Caldir export produced by the bundled adapter.
 
   SectionTitle { text: strings.t("settings.sync") }

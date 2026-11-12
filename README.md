@@ -1,167 +1,90 @@
 # Omarchy Glance
 
-A centered Omarchy clock panel that combines a calendar, a renCal/Caldir agenda, and recent notification history.
-
-## Features
-
-- Keeps Omarchy's clock and centered calendar popup
-- Shows colored event dots and a selectable daily agenda
-- Announces the next event beside the clock near its start time
-- Opens allowlisted Google Meet, Microsoft Teams, and Zoom links
-- Shows the 10 most recent archived notifications on the right
-- Opens stored notification actions or focuses/launches the originating app
-- Dismisses notifications after activation and supports **Dismiss all**
-
-## Calendar architecture
-
-Glance does not connect to Google, Microsoft, CalDAV, or any other provider.
-renCal owns provider authentication and synchronization, while Caldir keeps the
-result as standard RFC5545 files on disk:
-
-```text
-provider → renCal/Caldir → <caldir>/<calendar>/*.ics
-                         → caldir --json events + UID/URL property lookup
-                         → ~/.local/state/omarchy/calendar-events.json
-                         → Omarchy Glance
-```
-
-The bundled `sync/caldir-export` adapter runs on shell startup, whenever the
-panel opens, and every five minutes. It reads the Caldir location from
-`${XDG_CONFIG_HOME:-~/.config}/caldir/config.toml`, asks the official `caldir`
-CLI to expand recurrences and timezone overrides, and atomically writes
-Glance's local JSON view. A shared nonblocking lock prevents multiple monitor
-panels from launching duplicate exports.
-
-Caldir's JSON can omit a conference URL stored only in an event's standard
-`URL`/`CONFERENCE` property. The adapter therefore unfolds and scans only
-those recognized properties plus `UID` in top-level
-`<caldir>/<calendar>/*.ics` files, then attaches an allowlisted HTTPS
-Meet/Teams/Zoom URL by Caldir's raw `(calendar, uid)`. It does not parse dates,
-expand recurrence, read descriptions, read provider credentials, or modify
-`.ics` files.
-
-## Requirements
-
-- Omarchy with the Quickshell bar
-- [renCal](https://github.com/t4t5/rencal) configured with at least one calendar
-- [Caldir](https://github.com/t4t5/caldir) CLI with JSON event output
-- Python 3.11 or newer (`tomllib` is used by the stdlib-only adapter)
-- Optional: `ffmpegthumbnailer` or `ffmpeg` for screen-recording thumbnails in
-  the notification list (both ship with Omarchy). Without them, video
-  notifications show a film icon instead.
-
-Glance needs `caldir --json events`, which landed after the v0.11.1 release.
-Install the official source build, pinned to the v0.14.10 commit:
-
-```bash
-cargo install --git https://github.com/t4t5/caldir.git \
-  --rev d19547fe02a3635a7281828e32556363cd2fdd8c \
-  caldir-cli --bin caldir --root "$HOME/.local" --force
-```
-
-Confirm both the binary and local data are available:
-
-```bash
-caldir --version
-caldir --json events --from "$(date -I)" --to "$(date -I -d '+30 days')" | jq
-```
+**Your day at a glance, from the clock.** Glance replaces the Omarchy bar clock
+with one panel: a month calendar, the day's agenda from your calendars, and
+your recent notifications.
 
 ## Install
 
 ```bash
 omarchy plugin add https://github.com/tiagovicente2/omarchy-glance.git --enable
+```
+
+Glance takes the built-in clock's place. Disable or remove it and the stock
+clock comes back.
+
+Optional: keep calendars syncing in the background, even with the panel closed.
+This installs a systemd user timer that runs `caldir sync` every five minutes.
+
+```bash
 ~/.config/omarchy/plugins/omarchy-glance/install-helper.sh
 ```
 
-Glance is a clone of the built-in clock (`clonedFrom: omarchy.clock`), so
-enabling it takes the clock's place in the bar and disabling or removing it
-brings the stock clock back. It does not edit `shell.json` itself.
+## Dependencies
 
-`install-helper.sh` runs `setup/sync-timer`, which copies
-`caldir-sync.service` and `caldir-sync.timer` into
-`${XDG_CONFIG_HOME:-~/.config}/systemd/user/` and enables the timer to run
-`caldir sync` plus the Glance export every five minutes. Skip it if you only
-want Glance's built-in refresh (on shell startup, on panel open, and every
-five minutes while the shell runs).
+- [caldir](https://github.com/t4t5/caldir) 0.12 or newer, with a calendar
+  connected (`caldir connect google`, `icloud`, `outlook` or `caldav`)
+- `python3`, `jq` and `inotify-tools`
+- Optional: `ffmpegthumbnailer` or `ffmpeg`, for screen-recording thumbnails
 
-Connect and sync providers in renCal. Glance automatically reads the same
-Caldir configured by renCal; no additional OAuth or Google Cloud setup exists.
+Everything except caldir ships with Omarchy. Install caldir from source,
+pinned to the reviewed release:
 
-To open Glance with `SUPER + V`, add this to `~/.config/hypr/bindings.lua`:
+```bash
+cargo install --git https://github.com/t4t5/caldir.git \
+  --rev d19547fe02a3635a7281828e32556363cd2fdd8c \
+  caldir-cli caldir-provider-google --root "$HOME/.local" --force
+```
+
+Swap `caldir-provider-google` for `caldir-provider-icloud`,
+`-outlook` or `-caldav` as needed. [renCal](https://github.com/t4t5/rencal) also
+installs caldir's providers if you prefer a calendar app.
+
+## Features
+
+- **Calendar**: month grid with colored dots for days that have events and a
+  switchable week start
+- **Agenda**: the selected day's events, with a **Join** button on Google
+  Meet, Microsoft Teams and Zoom meetings shortly before they start
+- **Next up in the bar**: the clock announces the next event shortly before it
+  starts (15 minutes by default)
+- **Notifications**: your 30 most recent, grouped by day, with image and
+  screen-recording previews. Click one to run its action or focus its app, or
+  dismiss them one by one or all at once
+- **Unread dot** on the clock when something new arrives
+- **Settings**: hide calendars, hide declined invitations, and show year or
+  life progress
+- **Keyboard**: `↑` `↓` move through notifications, `←` `→` or `[` `]` change
+  month, `t` jumps to today, `w` flips the week start
+- Follows the Omarchy theme and language (English and Brazilian Portuguese)
+
+Optional: open Glance with a key. This example takes `SUPER + V` from
+Omarchy's universal paste, so pick another key if you use that. Add to
+`~/.config/hypr/bindings.lua`:
 
 ```lua
 hl.unbind("SUPER + V")
-o.bind("SUPER + V", "Toggle calendar", "omarchy-shell shell toggle omarchy.clock")
-```
-
-Then validate Hyprland:
-
-```bash
-hyprctl reload
-hyprctl configerrors
+o.bind("SUPER + V", "Glance", "omarchy-shell shell toggle omarchy.clock")
 ```
 
 ## Uninstall
 
-Stop and remove the background sync timer installed by `setup/sync-timer`:
-
-```bash
-systemctl --user disable --now caldir-sync.timer
-rm "${XDG_CONFIG_HOME:-$HOME/.config}"/systemd/user/caldir-sync.{service,timer}
-systemctl --user daemon-reload
-```
-
-Remove the plugin:
-
 ```bash
 omarchy plugin remove omarchy-glance
+systemctl --user disable --now caldir-sync.timer 2>/dev/null
+rm -f ~/.config/systemd/user/caldir-sync.{service,timer}
+rm -rf ~/.local/state/omarchy-glance ~/.local/state/omarchy/calendar-events.json
 ```
 
-Optionally delete Glance's local state (the notification seen marker, cached
-video thumbnails, and the exported calendar view):
+## Credits
 
-```bash
-rm -rf "${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-glance"
-rm -f ~/.local/state/omarchy/calendar-events.json
-```
+- [Omarchy](https://github.com/basecamp/omarchy): the built-in clock this
+  started from (MIT)
+- [tmn73/omarchy-calendar](https://github.com/tmn73/omarchy-calendar): calendar
+  event model and interface (MIT)
+- [jankeesvw/omarchy-notification-center](https://github.com/jankeesvw/omarchy-notification-center):
+  notification history helpers (MIT)
+- [caldir](https://github.com/t4t5/caldir): calendar sync and recurrence
+  expansion
 
-## Development
-
-```bash
-qmllint -I /usr/share/omarchy/shell Panel.qml NotificationHistory.qml SettingsView.qml
-omarchy plugin validate .
-git diff --check
-```
-
-Run the adapter directly:
-
-```bash
-./sync/caldir-export
-jq '.source, (.events | length)' ~/.local/state/omarchy/calendar-events.json
-```
-
-## Known limitations
-
-- Conference recovery intentionally ignores nested ICS files, descriptions,
-  arbitrary `X-*` properties, non-HTTPS URLs, and hosts outside the explicit
-  Meet/Teams/Zoom allowlist. This keeps the fallback narrow and safe.
-- Caldir JSON does not currently expose generic event deep links or event
-  types. Agenda rows therefore open only an available safe **Join** link; no
-  working-location/out-of-office filter is advertised.
-- The packaged Omarchy notification service owns a history-write queue. An
-  already queued archive can land after **Dismiss all**; Glance does not patch
-  that service, and the entry may appear on a later refresh.
-
-## Attribution
-
-- Calendar event model and interface adapted from
-  [tmn73/omarchy-calendar](https://github.com/tmn73/omarchy-calendar) (MIT)
-- Clock/calendar base derived from
-  [Omarchy](https://github.com/basecamp/omarchy) (MIT)
-- Notification history helpers (day grouping, icon resolution, markup
-  stripping, unread watcher) adapted from
-  [jankeesvw/omarchy-notification-center](https://github.com/jankeesvw/omarchy-notification-center)
-  (MIT)
-- Calendar data and recurrence expansion provided by
-  [renCal](https://github.com/t4t5/rencal) and
-  [Caldir](https://github.com/t4t5/caldir)
+MIT licensed. See [LICENSE](LICENSE).

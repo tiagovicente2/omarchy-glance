@@ -25,9 +25,7 @@ Item {
   readonly property string historyDir: (Quickshell.env("HOME") || "") + "/.local/state/omarchy/notifications/history"
   readonly property string popupDir: (Quickshell.env("HOME") || "") + "/.local/state/omarchy/notifications"
   readonly property string imagesDir: (Quickshell.env("HOME") || "") + "/.local/state/omarchy/notifications/images"
-  readonly property string ncImagesDir: (Quickshell.env("HOME") || "") + "/.local/state/omarchy-notification-center/images"
 
-  readonly property string ncBinPath: (Quickshell.env("HOME") || "") + "/.config/omarchy/plugins/jankeesvw.notification-center/bin/notification-center"
   readonly property string unreadBinPath: Qt.resolvedUrl("bin/glance-unread").toString().replace(/^file:\/\//, "")
 
   signal notificationActivated()
@@ -59,10 +57,9 @@ Item {
     readMark = Number(localState.lastSeen || 0)
     localState.lastSeen = nowMs
     Quickshell.execDetached(["bash", "-c",
-      "unreadbin=\"$1\"; ncbin=\"$2\"; stamp=\"$3\"\n" +
-      "[[ -x $unreadbin ]] && \"$unreadbin\" mark-seen \"$stamp\" >/dev/null 2>&1 || true\n" +
-      "[[ -x $ncbin ]] && \"$ncbin\" seen \"$stamp\" >/dev/null 2>&1 || true",
-      "--", unreadBinPath, ncBinPath, String(nowMs)])
+      "unreadbin=\"$1\"; stamp=\"$2\"\n" +
+      "[[ -x $unreadbin ]] && \"$unreadbin\" mark-seen \"$stamp\" >/dev/null 2>&1 || true",
+      "--", unreadBinPath, String(nowMs)])
     reload()
   }
 
@@ -119,12 +116,8 @@ Item {
 
         var fileSrc = root.extractMediaFilePath(entry.file || entry.execArgv || entry.exec)
         var previewSrc = entry.preview || ""
-        if (!previewSrc && fileSrc) {
-          if (root.isVideoFile(fileSrc)) {
-            previewSrc = "file://" + ncImagesDir + "/" + key + "-preview"
-          } else {
-            previewSrc = Util.fileUrl(fileSrc)
-          }
+        if (!previewSrc && fileSrc && !root.isVideoFile(fileSrc)) {
+          previewSrc = Util.fileUrl(fileSrc)
         }
 
         var argvStr = ""
@@ -166,15 +159,14 @@ Item {
       notificationService.clearHistory()
     }
     Quickshell.execDetached(["bash", "-c",
-      "ncbin=\"$1\"; popup=\"$2\"; hist=\"$3\"; unreadbin=\"$4\"\n" +
+      "popup=\"$1\"; hist=\"$2\"; unreadbin=\"$3\"\n" +
       "omarchy-shell -q notifications clear >/dev/null 2>&1 || true\n" +
-      "[[ -x $ncbin ]] && \"$ncbin\" clear >/dev/null 2>&1 || true\n" +
       "[[ -x $unreadbin ]] && \"$unreadbin\" mark-seen >/dev/null 2>&1 || true\n" +
       "rm -f -- \"$hist\"/*.json 2>/dev/null || true\n" +
       "find \"$popup\" -maxdepth 1 -type f -name '*.json' ! -name 'live.json' ! -name 'history.json' ! -name 'quiet.json' -delete 2>/dev/null || true\n" +
       "echo '[]' > \"$popup/history.json\" 2>/dev/null || true\n" +
       "echo '[]' > \"$popup/live.json\" 2>/dev/null || true",
-      "--", ncBinPath, popupDir, historyDir, unreadBinPath])
+      "--", popupDir, historyDir, unreadBinPath])
 
     historyModel.clear()
     root.deactivateCursor()
@@ -245,8 +237,7 @@ Item {
     var stamp = String(entry.timestamp || "")
 
     Quickshell.execDetached(["bash", "-c",
-      "ncbin=\"$1\"; popup=\"$2\"; hist=\"$3\"; key=\"$4\"; stem=\"$5\"\n" +
-      "[[ -x $ncbin ]] && \"$ncbin\" remove \"$key\" >/dev/null 2>&1 || true\n" +
+      "popup=\"$1\"; hist=\"$2\"; key=\"$3\"; stem=\"$4\"\n" +
       "for file in \"$popup/history.json\" \"$popup/live.json\"; do\n" +
       "  if [[ -f \"$file\" ]]; then\n" +
       "    tmp=$(mktemp \"${file}.XXXXXX\")\n" +
@@ -258,7 +249,7 @@ Item {
       "  fi\n" +
       "done\n" +
       "rm -f -- \"$popup/$stem.json\" \"$hist/$stem.json\" \"$popup/$key.json\" \"$hist/$key.json\" 2>/dev/null || true",
-      "--", ncBinPath, popupDir, historyDir, key, stamp + "-" + origId])
+      "--", popupDir, historyDir, key, stamp + "-" + origId])
 
     historyModel.remove(index)
     root.clampCursor()

@@ -2,26 +2,17 @@
 set -euo pipefail
 
 state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
-config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
 glance_state="$state_home/omarchy-glance"
-nc_state="$state_home/omarchy-notification-center"
-nc_bin="$config_home/omarchy/plugins/jankeesvw.notification-center/bin/notification-center"
 popups="$state_home/omarchy/notifications"
 history="$state_home/omarchy/notifications/history"
 
 mkdir -p "$glance_state"
 
 get_seen() {
-  local s1=0 s2=0
-  [[ -f "$glance_state/seen" ]] && s1=$(cat "$glance_state/seen" 2>/dev/null || echo 0)
-  [[ -f "$nc_state/seen" ]] && s2=$(cat "$nc_state/seen" 2>/dev/null || echo 0)
-  [[ "$s1" =~ ^[0-9]+$ ]] || s1=0
-  [[ "$s2" =~ ^[0-9]+$ ]] || s2=0
-  if (( s1 > s2 )); then
-    echo "$s1"
-  else
-    echo "$s2"
-  fi
+  local seen=0
+  [[ -f "$glance_state/seen" ]] && seen=$(cat "$glance_state/seen" 2>/dev/null || echo 0)
+  [[ "$seen" =~ ^[0-9]+$ ]] || seen=0
+  echo "$seen"
 }
 
 cmd_unread() {
@@ -66,20 +57,11 @@ cmd_mark_seen() {
   fi
 
   printf '%s\n' "$stamp" > "$glance_state/seen"
-  if [[ -d "$nc_state" ]]; then
-    printf '%s\n' "$stamp" > "$nc_state/seen" 2>/dev/null || true
-  fi
-
-  if [[ -x "$nc_bin" ]]; then
-    "$nc_bin" seen "$stamp" >/dev/null 2>&1 || true
-  fi
-
   printf '{"ok":true,"seen":%s}\n' "$stamp"
 }
 
 cmd_watch() {
   mkdir -p "$popups" "$history" "$glance_state"
-  [[ -d "$nc_state" ]] || mkdir -p "$nc_state" 2>/dev/null || true
 
   command -v inotifywait >/dev/null 2>&1 || {
     while true; do sleep 5; echo "poll"; done
@@ -87,7 +69,7 @@ cmd_watch() {
   }
 
   exec inotifywait -m -q -e close_write -e moved_to -e delete --format '%e %w%f' \
-    "$popups" "$history" "$glance_state" "$nc_state" 2>/dev/null
+    "$popups" "$history" "$glance_state" 2>/dev/null
 }
 
 case "${1:-}" in

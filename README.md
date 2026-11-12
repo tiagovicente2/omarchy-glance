@@ -76,6 +76,17 @@ other `shell.json` setting. It refuses malformed JSON rather than replacing
 it. With a custom `XDG_CONFIG_HOME`, use the corresponding plugin and config
 paths.
 
+To run both setup steps with one command, use the bundled `install-helper.sh`
+instead of calling `setup/center-anchor` and `setup/sync-timer` separately:
+
+```bash
+omarchy plugin add https://github.com/tiagovicente2/omarchy-glance.git --enable
+~/.config/omarchy/plugins/omarchy-glance/install-helper.sh
+```
+
+It runs `setup/center-anchor` and then `setup/sync-timer`, skipping either one
+if it is not executable.
+
 Connect and sync providers in renCal. Glance automatically reads the same
 Caldir configured by renCal; no additional OAuth or Google Cloud setup exists.
 
@@ -91,6 +102,30 @@ Then validate Hyprland:
 ```bash
 hyprctl reload
 hyprctl configerrors
+```
+
+## Uninstall
+
+Stop and remove the background sync timer installed by `setup/sync-timer`:
+
+```bash
+systemctl --user disable --now caldir-sync.timer
+rm "${XDG_CONFIG_HOME:-$HOME/.config}"/systemd/user/caldir-sync.{service,timer}
+systemctl --user daemon-reload
+```
+
+Remove the plugin:
+
+```bash
+omarchy plugin remove omarchy-glance
+```
+
+Optionally delete Glance's local state (the notification seen marker and the
+exported calendar view):
+
+```bash
+rm -rf "${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-glance"
+rm -f ~/.local/state/omarchy/calendar-events.json
 ```
 
 ## Development

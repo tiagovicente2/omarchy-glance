@@ -68,11 +68,11 @@ Panel {
   // starts out matching the rest of the desktop rather than a hardcoded
   // convention. Clicking the grid's "W" heading writes the choice back to
   // shell.json.
-  readonly property int weekStart: Model.normalizedWeekStart(setting("weekStartDay", null), Qt.locale().firstDayOfWeek)
-  // The interface is English throughout, so day names are not taken from the
-  // system locale. Where the week starts still is: that is a regional
-  // convention rather than a translation, and it stays overridable above.
-  readonly property var labelLocale: Qt.locale("en_US")
+  readonly property int weekStart: Model.normalizedWeekStart(setting("weekStartDay", null), labelLocale.firstDayOfWeek)
+  // Names, date formats and the default week start follow the live Omarchy
+  // language rather than the locale the shell started with, which only
+  // catches up at the next restart.
+  readonly property var labelLocale: Qt.locale(I18n.formatLocale)
   readonly property string nextWeekStartLabel: labelLocale.dayName(Model.toggledWeekStart(weekStart), Locale.LongFormat)
   readonly property var weekdays: Model.weekdayOrder(weekStart)
   readonly property var weeks: Model.monthGrid(viewYear, viewMonth, weekStart, todayKey, eventIndex)
@@ -373,7 +373,7 @@ Panel {
     setWeekStart(Model.toggledWeekStart(root.weekStart))
   }
 
-  // English short day names, matching the rest of the interface.
+  // Short day names in the Omarchy language.
   function weekdayLabel(weekday) {
     return String(labelLocale.dayName(weekday, Locale.ShortFormat)).toUpperCase()
   }
@@ -543,7 +543,7 @@ Panel {
                 id: heroDate
                 textFormat: Text.PlainText
                 anchors.verticalCenter: parent.verticalCenter
-                text: Qt.formatDate(root.today, "MMMM d")
+                text: root.labelLocale.toString(root.today, "MMMM d")
                 color: heroMouse.containsMouse
                   ? Style.hoverStateColor(root.contentForeground, Color.accent)
                   : root.contentForeground
@@ -1031,7 +1031,7 @@ Panel {
                 // "MAY 2026" and a "SEPTEMBER 2026".
                 width: Style.space(130)
                 horizontalAlignment: Text.AlignHCenter
-                text: Qt.formatDate(root.viewDate, "MMMM yyyy").toUpperCase()
+                text: root.labelLocale.toString(root.viewDate, "MMMM yyyy").toUpperCase()
                 color: Qt.darker(root.contentForeground, 1.4)
                 font.family: root.contentFontFamily
                 font.pixelSize: Style.font.body
@@ -1075,7 +1075,7 @@ Panel {
 
             Text {
               width: parent.width
-              text: Qt.formatDate(root.selectedDate, "dddd d MMMM").toUpperCase()
+              text: root.labelLocale.toString(root.selectedDate, "dddd d MMMM").toUpperCase()
               color: Qt.darker(root.contentForeground, 1.4)
               font.family: root.contentFontFamily
               font.pixelSize: Style.font.caption
@@ -1165,7 +1165,7 @@ Panel {
                     ? qsTr("All day")
                     : eventRow.modelData.continuation
                       ? qsTr("Ongoing")
-                      : Qt.formatDateTime(new Date(eventRow.modelData.start), "HH:mm")
+                      : root.labelLocale.toString(new Date(eventRow.modelData.start), "HH:mm")
                   color: Qt.darker(root.contentForeground, eventRow.declined ? 2.2 : 1.5)
                   font.family: root.contentFontFamily
                   font.pixelSize: Style.font.bodySmall
@@ -1253,7 +1253,7 @@ Panel {
             eventCount: root.eventDoc && root.eventDoc.events ? root.eventDoc.events.length : 0
             sourceLabel: root.eventDoc ? String(root.eventDoc.source || "") : ""
             syncedAt: root.eventDoc && root.eventDoc.syncedAt
-              ? Qt.formatDateTime(new Date(root.eventDoc.syncedAt), "d MMM HH:mm")
+              ? root.labelLocale.toString(new Date(root.eventDoc.syncedAt), "d MMM HH:mm")
               : ""
 
             onCalendarToggled: function(calendarId) { root.toggleCalendar(calendarId) }

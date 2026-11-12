@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Make cached first-frame thumbnails for video files named in notifications.
+#
+# Usage: glance-thumb <absolute-video-path>...
+# Prints one JSON object per thumbnail that exists after the run:
+#   {"file":"/path/video.mp4","thumb":"/state/omarchy-glance/thumbs/<md5>.jpg"}
+#
+# Paths come from notification data, so each one must be an absolute path to a
+# regular, readable video file. Anything else is skipped silently.
+set -uo pipefail
+
+state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
+thumbs="$state_home/omarchy-glance/thumbs"
+max_files=30
+width=480
+
+mkdir -p "$thumbs"
+
+# Keep the cache small: thumbnails nobody has needed for 30 days go.
+find "$thumbs" -maxdepth 1 -type f -name '*.jpg' -mtime +30 -delete 2>/dev/null || true
+
+make_thumb() {
+  local src="$1" out="$2" tmp
+  tmp=$(mktemp "$thumbs/.thumb.XXXXXX.jpg") || return 1
+  if command -v ffmpegthumbnailer >/dev/null 2>&1; then
+    timeout 10 nice -n 19 ffmpegthumbnailer -i "$src" -o "$tmp" -s "$width" -q 7 -c jpeg >/dev/null 2>&1
+  elif command -v ffmpeg >/dev/null 2>&1; then
+    timeout 10 nice -n 19 ffmpeg -nostdin -loglevel error -y -ss 0.5 -i "$src" \
+      -frames:v 1 -vf "scale=$width:-2" -f image2 "$tmp" >/dev/null 2>&1
+  else
+    false
+  fi
+  local status=$?
+  if (( status == 0 )) && [[ -s $tmp ]]; then
+    mv -f "$tmp" "$out"
+  else
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+count=0
+for src in "$@"; do
+  (( count++ < max_files )) || break
+  [[ $src == /* && $src != *$'\n'* ]] || continue
+  [[ ${src,,} =~ \.(mp4|mkv|webm|mov|avi)$ ]] || continue
+  [[ -f $src && -r $src ]] || continue
+
+  hash=$(printf '%s' "$src" | md5sum | cut -d' ' -f1)
+  out="$thumbs/$hash.jpg"
+
+  if [[ ! -s $out || $src -nt $out ]]; then
+    make_thumb "$src" "$out" || continue
+  else
+    touch "$out" 2>/dev/null || true
+  fi
+
+  jq -cn --arg file "$src" --arg thumb "$out" '{file: $file, thumb: $thumb}'
+done

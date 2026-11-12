@@ -27,6 +27,11 @@ Item {
   readonly property string imagesDir: (Quickshell.env("HOME") || "") + "/.local/state/omarchy/notifications/images"
 
   readonly property string unreadBinPath: Qt.resolvedUrl("bin/glance-unread").toString().replace(/^file:\/\//, "")
+  readonly property string thumbBinPath: Qt.resolvedUrl("bin/glance-thumb").toString().replace(/^file:\/\//, "")
+
+  // Video path -> cached thumbnail file URL, filled in by glance-thumb.
+  property var videoThumbs: ({})
+  property var pendingThumbFiles: []
 
   signal notificationActivated()
 
@@ -100,6 +105,7 @@ Item {
     historyModel.clear()
     var lines = String(raw || "").split("\n")
     var seenKeys = ({})
+    var videoFiles = []
     for (var i = 0; i < lines.length && historyModel.count < 30; i++) {
       var line = lines[i].trim()
       if (!line) continue
@@ -116,8 +122,10 @@ Item {
 
         var fileSrc = root.extractMediaFilePath(entry.file || entry.execArgv || entry.exec)
         var previewSrc = entry.preview || ""
-        if (!previewSrc && fileSrc && !root.isVideoFile(fileSrc)) {
-          previewSrc = Util.fileUrl(fileSrc)
+        if (!previewSrc && fileSrc) {
+          if (!root.isVideoFile(fileSrc)) previewSrc = Util.fileUrl(fileSrc)
+          else if (root.videoThumbs[fileSrc]) previewSrc = root.videoThumbs[fileSrc]
+          else if (videoFiles.indexOf(fileSrc) === -1) videoFiles.push(fileSrc)
         }
 
         var argvStr = ""
@@ -148,6 +156,7 @@ Item {
       }
     }
     root.clampCursor()
+    root.requestThumbs(videoFiles)
   }
 
   function dismissAll() {
@@ -531,6 +540,56 @@ Item {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.replaceHistory(text)
+    }
+  }
+
+  function requestThumbs(files) {
+    if (!files || files.length === 0) return
+    if (thumbLoader.running) {
+      root.pendingThumbFiles = files
+      return
+    }
+    thumbLoader.command = [root.thumbBinPath].concat(files)
+    thumbLoader.running = true
+  }
+
+  function applyThumbs(raw) {
+    var lines = String(raw || "").split("\n")
+    var next = Object.assign({}, root.videoThumbs)
+    var changed = false
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i].trim()
+      if (!line) continue
+      try {
+        var item = JSON.parse(line)
+        var file = String(item.file || "")
+        var thumb = String(item.thumb || "")
+        if (!file || !thumb || thumb.charAt(0) !== "/") continue
+        next[file] = Util.fileUrl(thumb)
+        changed = true
+      } catch (error) {}
+    }
+    if (!changed) return
+    root.videoThumbs = next
+    for (var j = 0; j < historyModel.count; j++) {
+      var row = historyModel.get(j)
+      if (row.preview === "" && row.file !== "" && next[row.file])
+        historyModel.setProperty(j, "preview", next[row.file])
+    }
+  }
+
+  Process {
+    id: thumbLoader
+    running: false
+    onExited: {
+      if (root.pendingThumbFiles.length === 0) return
+      var files = root.pendingThumbFiles
+      root.pendingThumbFiles = []
+      Qt.callLater(function() { root.requestThumbs(files) })
+    }
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.applyThumbs(text)
     }
   }
 

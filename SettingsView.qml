@@ -31,6 +31,8 @@ Column {
   property string syncState: "missing"
   property string exportError: ""
   property bool pullFailed: false
+  // The exporter could not find the caldir binary (exit 3).
+  property bool caldirMissing: false
 
   signal calendarToggled(string calendarId)
   signal yearProgressToggled()
@@ -254,6 +256,7 @@ Column {
     textFormat: Text.PlainText
 
     text: {
+      if (root.caldirMissing) return strings.t("settings.syncMissing")
       if (root.exportError !== "")
         return strings.t(root.pullFailed ? "settings.pullFailed" : "settings.exportFailed").arg(root.exportError)
       if (root.syncState === "missing") return strings.t("settings.syncMissing")

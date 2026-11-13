@@ -38,7 +38,7 @@ Panel {
   property var hostWidget: null
   readonly property var barIdentity: hostWidget || root
 
-  // ---- Today. SystemClock keeps this honest across midnight so the
+  // ---- Today. WallClock keeps this honest across midnight so the
   //      highlight rolls over without the panel being reopened.
   property date today: new Date()
   readonly property string todayKey: Model.keyForDate(today)
@@ -48,7 +48,10 @@ Panel {
   property int viewYear: today.getFullYear()
   property int viewMonth: today.getMonth()
 
-  readonly property date viewDate: new Date(viewYear, viewMonth, 1)
+  // Local noon, not midnight: where daylight saving starts at midnight the
+  // first of the month has no midnight, and it would read back as the month
+  // before.
+  readonly property date viewDate: new Date(viewYear, viewMonth, 1, 12)
   readonly property bool viewingCurrentMonth: viewYear === today.getFullYear() && viewMonth === today.getMonth()
 
   // Pinned to today, not to the month being browsed — stepping through the
@@ -80,6 +83,15 @@ Panel {
   readonly property var weekdays: Model.weekdayOrder(weekStart)
   readonly property var weeks: Model.monthGrid(viewYear, viewMonth, weekStart, todayKey, eventIndex)
 
+  // Date patterns are the plugin's own catalog entries, so each language sets
+  // its word order ("12 de novembro"). The month heading uses the standalone
+  // name: the format name is genitive in Russian, Polish and Czech.
+  readonly property string heroLabel: labelLocale.toString(today, strings.t("panel.dayMonthFormat"))
+  readonly property string monthYearLabel: strings.t("panel.monthYear")
+    .arg(labelLocale.standaloneMonthName(viewMonth, Locale.LongFormat))
+    .arg(viewDate.toLocaleDateString(labelLocale, "yyyy"))
+  readonly property string eventTimeFormat: labelLocale.timeFormat(Locale.ShortFormat)
+
   // ---- Events, read from whatever wrote the state file. The panel never
   //      learns where they came from: Google, khal, an ICS feed and a shell
   //      script all look identical from here.
@@ -91,9 +103,11 @@ Panel {
   // to elapse before calling the file stale, so one missed run stays quiet.
   readonly property int syncIntervalSeconds: 300
 
-  // On: each refresh runs `caldir pull` first, so new events arrive without
-  // anything else running. Read-only: Glance never pushes calendar changes.
-  readonly property bool syncCalendars: setting("syncCalendars", true)
+  // On: refreshes ask the exporter to run `caldir pull` first, which it does
+  // at most once per syncIntervalSeconds (the timer and every panel open), so
+  // new events arrive without anything else running. Read-only: Glance never
+  // pushes calendar changes.
+  readonly property bool syncCalendars: Model.flag(setting("syncCalendars", true), true)
 
   // The adapter reads the local Caldir through the official caldir CLI.
   // It is bundled with the plugin and runs without owning provider credentials.
@@ -101,16 +115,29 @@ Panel {
     Qt.resolvedUrl("sync/caldir-export"), "")
   property string exportError: ""
   property bool pullFailed: false
-  property bool exportPending: false
+  property bool caldirMissing: false
+  // "" when nothing is queued, else the strongest request that arrived while
+  // an export was running ("force" beats "pull" beats "export").
+  property string exportPendingMode: ""
+  // Re-evaluated every minute through nowTick, so the file goes stale on
+  // screen without anything else happening.
   readonly property string syncState: eventVersionMismatch
     ? "version"
-    : Model.syncState(eventDoc, Date.now(), syncIntervalSeconds)
+    : Model.syncState(eventDoc, nowTick.getTime(), syncIntervalSeconds)
+
+  // Set by BarWidget once the bar has injected real settings. Until then
+  // setting() answers with fallbacks, so nothing may run the exporter.
+  property bool settingsReady: false
+  // One copy per shell runs the timer and the startup export (see
+  // BarWidget.leads); without a host it runs its own.
+  readonly property bool ownsSync: !hostWidget || hostWidget.leads === true
 
   // The day whose agenda is listed under the grid. The upstream clock had no
   // cursor at all, so this is the one place the fork departs from it.
   property string selectedDayKey: todayKey
   readonly property var selectedEvents: Model.eventsForDateKey(eventIndex, selectedDayKey)
   readonly property date selectedDate: Model.dateFromKey(selectedDayKey, today)
+  readonly property string selectedDateLabel: labelLocale.toString(selectedDate, strings.t("panel.agendaDayFormat"))
 
   function selectDay(key) {
     root.selectedDayKey = String(key)
@@ -124,7 +151,8 @@ Panel {
       try {
         var parsed = JSON.parse(raw)
         if (parsed && parsed.version === 1) {
-          doc = parsed
+          // Shape-checked and capped: anything can write this file.
+          doc = Model.sanitizeEventsDocument(parsed)
         } else if (parsed && parsed.version !== undefined) {
           // Written by a newer sync than this widget understands. Say so
           // rather than render an empty month that reads as a quiet week.
@@ -157,16 +185,17 @@ Panel {
   // what a countdown needs. `today` deliberately only moves at midnight.
   property date nowTick: new Date()
   readonly property var upcomingEvent: Model.nextEventToday(visibleEventList, nowTick.getTime(), todayKey)
-  readonly property string upcomingCountdown: Model.formatCountdown(Model.millisUntil(upcomingEvent, nowTick.getTime())) || ""
+  readonly property string upcomingCountdown: Model.countdownText(
+    Model.formatCountdown(Model.millisUntil(upcomingEvent, nowTick.getTime())), strings, Commons.I18n)
 
   // The year and life bars are the upstream clock's, kept but opt-in. What
   // most people want in that slot is what is coming up next, not how much of
   // the year is gone.
-  readonly property bool showYearProgress: setting("showYearProgress", false)
+  readonly property bool showYearProgress: Model.flag(setting("showYearProgress", false), false)
 
   // Declined invitations stay in by default: you may still want to see what
   // you said no to, while the settings page can hide them explicitly.
-  readonly property bool hideDeclined: setting("hideDeclined", false)
+  readonly property bool hideDeclined: Model.flag(setting("hideDeclined", false), false)
 
   // Hiding happens here rather than in the sync, so toggling a calendar back
   // on is instant instead of waiting for the next fetch. The sync keeps
@@ -206,7 +235,8 @@ Panel {
   function toggleSyncCalendars() {
     var next = !root.syncCalendars
     persistSettings({ syncCalendars: next })
-    if (next) Qt.callLater(root.exportEvents)
+    // Turning sync on is a request to sync now, past the rate limit.
+    if (next) Qt.callLater(function() { root.exportEvents("force") })
   }
 
   // Qt.openUrlExternally rather than the shell helper on purpose. That helper
@@ -226,16 +256,31 @@ Panel {
   onHiddenCalendarsChanged: root.rebuildIndex()
   onHideDeclinedChanged: root.rebuildIndex()
   onSettingsChanged: root.adoptSettings()
-  Component.onCompleted: {
-    root.adoptSettings()
-    root.exportEvents()
+  // Never from Component.onCompleted: the Loader builds this panel before the
+  // bar has injected settings, and an export started then would pull even for
+  // someone who turned sync off.
+  onSettingsReadyChanged: Qt.callLater(root.startupExport)
+  onOwnsSyncChanged: Qt.callLater(root.startupExport)
+
+  // The leading copy exports once settings are real (and again when it
+  // takes over the lead). The exporter's rate limit keeps this from pulling
+  // more than once per interval.
+  function startupExport() {
+    if (root.settingsReady && root.ownsSync) root.exportEvents("pull")
   }
+  Component.onCompleted: root.adoptSettings()
 
 
   // Guarded so the widget renders before the bar is injected (the bar-widget
   // contract instantiates it bare).
   readonly property color contentForeground: bar ? bar.foreground : Color.foreground
   readonly property string contentFontFamily: bar ? bar.fontFamily : Style.font.family
+
+  // The locale's own short date and time, for "Last export".
+  readonly property string syncedAtLabel: {
+    var stamp = eventDoc && eventDoc.syncedAt ? Date.parse(eventDoc.syncedAt) : NaN
+    return isNaN(stamp) ? "" : new Date(stamp).toLocaleString(labelLocale, Locale.ShortFormat)
+  }
 
   readonly property int cellWidth: Style.space(52)
   readonly property int cellHeight: Style.space(34)
@@ -245,8 +290,15 @@ Panel {
 
   function open() {
     refresh()
-    root.exportEvents()
-    notificationHistory.refresh()
+    // --pull, which the exporter skips when the last pull is recent.
+    root.exportEvents("pull")
+    // The content is built on first open. Build it now so the notification
+    // list can load and mark what it shows as seen.
+    var content = panel.ensureContent()
+    if (content) content.notificationHistory.refresh()
+    else Qt.callLater(function() {
+      if (panel.loadedContent) panel.loadedContent.notificationHistory.refresh()
+    })
     if (root.hostWidget && typeof root.hostWidget.markSeen === "function") root.hostWidget.markSeen()
     root.controller.show()
     // Set after showing, not before: showing hands the popout coordinator
@@ -273,9 +325,9 @@ Panel {
   }
 
   function refreshNotifications() {
-    if (notificationHistory && typeof notificationHistory.reload === "function") {
-      notificationHistory.reload()
-    }
+    var content = panel.loadedContent
+    if (content && content.notificationHistory && typeof content.notificationHistory.reload === "function")
+      content.notificationHistory.reload()
   }
 
   function switchPanel(direction) {
@@ -298,9 +350,15 @@ Panel {
     root.goToToday()
   }
 
-  function goToToday() {
+  function showTodaysMonth() {
     root.viewYear = today.getFullYear()
     root.viewMonth = today.getMonth()
+  }
+
+  // Home: today's month and today's agenda.
+  function goToToday() {
+    root.showTodaysMonth()
+    root.selectedDayKey = root.todayKey
   }
 
   function moveMonth(delta) {
@@ -339,6 +397,10 @@ Panel {
   function startEditingLife() {
     root.editingLife = true
     Qt.callLater(function() {
+      var content = panel.loadedContent
+      if (!content) return
+      var bornField = content.bornField
+      var expectancyField = content.expectancyField
       bornField.text = root.birthYear > 0 ? String(root.birthYear) : ""
       expectancyField.text = String(root.lifeExpectancy)
       bornField.selectAll()
@@ -348,7 +410,7 @@ Panel {
 
   function cancelEditingLife() {
     root.editingLife = false
-    Qt.callLater(function() { if (keyCatcher) keyCatcher.forceActiveFocus() })
+    Qt.callLater(function() { if (panel.loadedContent) panel.loadedContent.forceActiveFocus() })
   }
 
   // Shared by both fields: Tab hops to the other one, Enter commits the pair,
@@ -376,6 +438,10 @@ Panel {
   }
 
   function commitLife() {
+    var content = panel.loadedContent
+    if (!content) return
+    var bornField = content.bornField
+    var expectancyField = content.expectancyField
     var born = Model.parseBirthYear(bornField.text, today.getFullYear())
     var span = Model.parseLifeExpectancy(expectancyField.text)
     if (born !== root.birthYear || span !== root.lifeExpectancy)
@@ -407,52 +473,79 @@ Panel {
     onFileChanged: reload()
   }
 
-  function exportEvents() {
+  // mode: "export" (no pull), "pull" (pull if the last one is older than
+  // the interval; the exporter enforces that) or "force" (pull now, for when
+  // sync was just turned on). With sync off every mode only exports.
+  function exportEvents(mode) {
+    if (!root.settingsReady) return
+    var wanted = mode === "force" || mode === "pull" ? mode : "export"
     if (caldirExporter.running) {
-      root.exportPending = true
+      var rank = { "": 0, "export": 1, "pull": 2, "force": 3 }
+      if (rank[wanted] > rank[root.exportPendingMode]) root.exportPendingMode = wanted
       return
     }
-    root.exportError = ""
-    caldirExporter.command = root.syncCalendars
-      ? [root.exporterPath, "--pull"]
-      : [root.exporterPath]
+    // The last state stays up until the new run reports, so a run that
+    // finds the lock busy (exit 75) changes nothing.
+    root.exportStderr = ""
+    caldirExporter.command = Model.exporterCommand(root.exporterPath, root.syncCalendars,
+      wanted === "export" ? "" : wanted, root.syncIntervalSeconds)
     caldirExporter.running = true
   }
+
+  function applyExportOutcome(outcome) {
+    if (!outcome) return
+    root.exportError = String(outcome.error || "")
+    root.pullFailed = outcome.pullFailed === true
+    root.caldirMissing = outcome.caldirMissing === true
+  }
+
+  property string exportStderr: ""
 
   Process {
     id: caldirExporter
     running: false
     stderr: StdioCollector {
+      id: exporterStderr
       waitForEnd: true
-      onStreamFinished: root.exportError = text.trim().replace(/^caldir pull failed: /, "")
+      onStreamFinished: root.exportStderr = text
     }
     onExited: function(exitCode) {
-      // 2: the pull failed but the export of what is on disk succeeded.
-      root.pullFailed = exitCode === 2
-      if (exitCode === 0) root.exportError = ""
-      if (!root.exportPending) return
-      root.exportPending = false
-      Qt.callLater(root.exportEvents)
+      // Exit codes per sync/caldir-export: 0 ok, 3 caldir missing, 10 the
+      // pull failed but what is on disk was exported, 75 another export holds
+      // the lock (keep the current state; the next tick retries), else failed.
+      var outcome = Model.exportOutcome(exitCode, String(exporterStderr.text || root.exportStderr || ""))
+      if (outcome) {
+        root.applyExportOutcome(outcome)
+        // Every monitor shows the same state, whichever panel ran it.
+        if (root.hostWidget && typeof root.hostWidget.shareExportOutcome === "function")
+          root.hostWidget.shareExportOutcome(outcome)
+      }
+      if (root.exportPendingMode === "") return
+      var next = root.exportPendingMode
+      root.exportPendingMode = ""
+      Qt.callLater(function() { root.exportEvents(next) })
     }
   }
 
   Timer {
     interval: root.syncIntervalSeconds * 1000
-    running: true
+    running: root.settingsReady && root.ownsSync
     repeat: true
-    onTriggered: root.exportEvents()
+    onTriggered: root.exportEvents("pull")
   }
 
-  SystemClock {
+  WallClock {
     id: clock
-    precision: SystemClock.Minutes
     onDateChanged: {
       // Always, so the countdown moves even when the day has not.
       root.nowTick = clock.date
       if (Model.keyForDate(clock.date) === String(root.todayKey)) return
-      var followToday = root.viewingCurrentMonth
+      // Midnight: whatever was following today keeps following it.
+      var followMonth = root.viewingCurrentMonth
+      var followSelection = root.selectedDayKey === root.todayKey
       root.today = clock.date
-      if (followToday) root.goToToday()
+      if (followMonth) root.showTodaysMonth()
+      if (followSelection) root.selectedDayKey = root.todayKey
     }
   }
 
@@ -463,12 +556,19 @@ Panel {
     bar: root.bar
     open: root.opened
     centerOnBar: true
-    focusTarget: keyCatcher
+    focusTarget: panel.loadedContent
     contentWidth: panel.fittedContentWidth(Style.space(980))
-    contentHeight: panel.fittedContentHeight(calendarColumn.implicitHeight)
+    contentHeight: panel.fittedContentHeight(panel.loadedContentHeight)
 
-    PanelKeyCatcher {
+    // Lazy, like stock Omarchy's clock: built on the first open rather than
+    // on every monitor at shell start. Data, timers and the exporter stay on
+    // the Panel root above, so they run while this is unbuilt.
+    content: PanelKeyCatcher {
       id: keyCatcher
+      property alias bornField: bornField
+      property alias expectancyField: expectancyField
+      property alias notificationHistory: notificationHistory
+      implicitHeight: calendarColumn.implicitHeight
       anchors.fill: parent
       blocked: root.editingLife
       onMoveRequested: function(dx, dy) {
@@ -561,7 +661,7 @@ Panel {
                 id: heroDate
                 textFormat: Text.PlainText
                 anchors.verticalCenter: parent.verticalCenter
-                text: root.labelLocale.toString(root.today, "MMMM d")
+                text: root.heroLabel
                 color: heroMouse.containsMouse
                   ? Style.hoverStateColor(root.contentForeground, Color.accent)
                   : root.contentForeground
@@ -577,7 +677,7 @@ Panel {
               y: heroRow.y
               width: heroRow.width
               height: heroRow.height
-              enabled: !root.viewingCurrentMonth
+              enabled: !root.viewingCurrentMonth || root.selectedDayKey !== root.todayKey
               hoverEnabled: enabled
               cursorShape: Qt.PointingHandCursor
               onClicked: root.goToToday()
@@ -693,7 +793,7 @@ Panel {
                   id: expectancyField
                   width: Style.space(60)
                   anchors.verticalCenter: parent.verticalCenter
-                  placeholderText: "90"
+                  placeholderText: Commons.I18n.formatNumber(Model.DEFAULT_LIFE_EXPECTANCY)
                   foreground: root.contentForeground
                   font.family: root.contentFontFamily
                   inputMethodHints: Qt.ImhDigitsOnly
@@ -708,7 +808,7 @@ Panel {
                 visible: root.showYearProgress && !root.editingLife
                 anchors.left: parent.left
                 anchors.verticalCenter: parent.verticalCenter
-                text: root.today.getFullYear()
+                text: Commons.I18n.formatNumber(root.today.getFullYear())
                 color: Qt.darker(root.contentForeground, 1.5)
                 font.family: root.contentFontFamily
                 font.pixelSize: Style.font.bodySmall
@@ -721,7 +821,7 @@ Panel {
                 visible: root.showYearProgress && !root.editingLife
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
-                text: root.yearDonePercent + "%"
+                text: Commons.I18n.formatNumber(root.yearDonePercent) + "%"
                 color: root.contentForeground
                 font.family: root.contentFontFamily
                 font.pixelSize: Style.font.bodySmall
@@ -781,7 +881,7 @@ Panel {
                 textFormat: Text.PlainText
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
-                text: root.lifeDonePercent + "%"
+                text: Commons.I18n.formatNumber(root.lifeDonePercent) + "%"
                 color: root.contentForeground
                 font.family: root.contentFontFamily
                 font.pixelSize: Style.font.bodySmall
@@ -932,7 +1032,7 @@ Panel {
                     height: root.cellHeight
                     horizontalAlignment: Text.AlignHCenter
                     verticalAlignment: Text.AlignVCenter
-                    text: modelData.week
+                    text: Commons.I18n.formatNumber(modelData.week)
                     color: Qt.darker(root.contentForeground, 1.9)
                     font.family: root.contentFontFamily
                     font.pixelSize: Style.font.caption
@@ -972,7 +1072,7 @@ Panel {
                         // days that have any, so an empty month does not
                         // shift under the cursor.
                         anchors.verticalCenterOffset: modelData.hasEvent ? -Style.space(3) : 0
-                        text: modelData.day
+                        text: Commons.I18n.formatNumber(modelData.day)
                         color: modelData.inMonth
                           ? (modelData.weekend ? Qt.darker(root.contentForeground, 1.45) : root.contentForeground)
                           : Qt.darker(root.contentForeground, 2.2)
@@ -1012,9 +1112,13 @@ Panel {
             }
 
             // Hairline down the week-number gutter, drawn only beside the
-            // day rows so it does not cut through the header band.
+            // day rows so it does not cut through the header band. Placed
+            // by x, so it follows the rows to the right edge when mirrored.
             Rectangle {
-              x: gridColumn.x + root.weekColumnWidth + root.cellSpacing + Math.round((root.gutterWidth - width) / 2)
+              readonly property real gutterOffset: root.weekColumnWidth + root.cellSpacing + Math.round((root.gutterWidth - width) / 2)
+              x: LayoutMirroring.enabled
+                ? gridColumn.x + gridColumn.width - gutterOffset - width
+                : gridColumn.x + gutterOffset
               y: gridColumn.y + headerRow.height + gridColumn.spacing
               width: Style.spacing.hairline
               height: gridColumn.height - headerRow.height - gridColumn.spacing
@@ -1049,7 +1153,7 @@ Panel {
                 // "MAY 2026" and a "SEPTEMBER 2026".
                 width: Style.space(130)
                 horizontalAlignment: Text.AlignHCenter
-                text: root.labelLocale.toString(root.viewDate, "MMMM yyyy").toUpperCase()
+                text: root.monthYearLabel.toUpperCase()
                 color: Qt.darker(root.contentForeground, 1.4)
                 font.family: root.contentFontFamily
                 font.pixelSize: Style.font.body
@@ -1062,7 +1166,8 @@ Panel {
                 anchors.left: parent.left
                 anchors.leftMargin: -Style.space(8)
                 anchors.verticalCenter: parent.verticalCenter
-                iconText: "󰅁"
+                // Mirrored layouts put "previous" on the right, so it points right.
+                iconText: Commons.I18n.rightToLeft ? "󰅂" : "󰅁"
                 tooltipText: strings.t("panel.previousMonth")
                 foreground: root.contentForeground
                 fontFamily: root.contentFontFamily
@@ -1073,7 +1178,7 @@ Panel {
                 anchors.right: parent.right
                 anchors.rightMargin: -Style.space(8)
                 anchors.verticalCenter: parent.verticalCenter
-                iconText: "󰅂"
+                iconText: Commons.I18n.rightToLeft ? "󰅁" : "󰅂"
                 tooltipText: strings.t("panel.nextMonth")
                 foreground: root.contentForeground
                 fontFamily: root.contentFontFamily
@@ -1093,7 +1198,8 @@ Panel {
 
             Text {
               width: parent.width
-              text: root.labelLocale.toString(root.selectedDate, "dddd d MMMM").toUpperCase()
+              textFormat: Text.PlainText
+              text: root.selectedDateLabel.toUpperCase()
               color: Qt.darker(root.contentForeground, 1.4)
               font.family: root.contentFontFamily
               font.pixelSize: Style.font.caption
@@ -1183,7 +1289,7 @@ Panel {
                     ? strings.t("panel.allDay")
                     : eventRow.modelData.continuation
                       ? strings.t("panel.ongoing")
-                      : root.labelLocale.toString(new Date(eventRow.modelData.start), "HH:mm")
+                      : root.labelLocale.toString(new Date(eventRow.modelData.start), root.eventTimeFormat)
                   color: Qt.darker(root.contentForeground, eventRow.declined ? 2.2 : 1.5)
                   font.family: root.contentFontFamily
                   font.pixelSize: Style.font.bodySmall
@@ -1235,7 +1341,9 @@ Panel {
               wrapMode: Text.WordWrap
               textFormat: Text.PlainText
 
-              text: root.exportError !== ""
+              text: root.caldirMissing
+                ? strings.t("panel.syncMissing")
+                : root.exportError !== ""
                 ? strings.t(root.pullFailed ? "panel.pullFailed" : "panel.exportFailed").arg(root.exportError)
                 : root.syncState === "missing"
                   ? strings.t("panel.syncMissing")
@@ -1270,11 +1378,10 @@ Panel {
             syncState: root.syncState
             exportError: root.exportError
             pullFailed: root.pullFailed
+            caldirMissing: root.caldirMissing
             eventCount: root.eventDoc && root.eventDoc.events ? root.eventDoc.events.length : 0
             sourceLabel: root.eventDoc ? String(root.eventDoc.source || "") : ""
-            syncedAt: root.eventDoc && root.eventDoc.syncedAt
-              ? root.labelLocale.toString(new Date(root.eventDoc.syncedAt), "d MMM HH:mm")
-              : ""
+            syncedAt: root.syncedAtLabel
 
             onCalendarToggled: function(calendarId) { root.toggleCalendar(calendarId) }
             onYearProgressToggled: root.toggleYearProgress()

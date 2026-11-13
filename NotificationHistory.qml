@@ -362,67 +362,12 @@ Item {
     readMark = Math.max(readMark, clearedAt)
     localState.lastSeen = clearedAt
 
-    var dropKeys = ({})
-    for (var i = 0; i < historyModel.count; i++) {
-      var mk = String(historyModel.get(i).key || "")
-      if (mk) dropKeys[mk] = true
-    }
-
-    if (notificationService) {
-      if (Array.isArray(notificationService.liveEntries)) {
-        for (var l = 0; l < notificationService.liveEntries.length; l++) {
-          var lk = notificationService.liveEntries[l] && String(notificationService.liveEntries[l].key || "")
-          if (lk) dropKeys[lk] = true
-        }
-      }
-      if (Array.isArray(notificationService.historyEntries)) {
-        for (var h = 0; h < notificationService.historyEntries.length; h++) {
-          var hk = notificationService.historyEntries[h] && String(notificationService.historyEntries[h].key || "")
-          if (hk) dropKeys[hk] = true
-        }
-      }
-
-      if (typeof notificationService.clearAll === "function") {
-        notificationService.clearAll("dismissed", true)
-      }
-
-      var pruneService = function() {
-        if (!notificationService) return
-        if (Array.isArray(notificationService.historyEntries)) {
-          var keptHist = notificationService.historyEntries.filter(function(e) {
-            if (!e) return false
-            var k = String(e.key || "")
-            if (k && dropKeys[k]) return false
-            var tsMs = Number(e.ts || 0) * 1000
-            return isFinite(tsMs) && tsMs > clearedAt
-          })
-          if (keptHist.length !== notificationService.historyEntries.length) {
-            notificationService.historyEntries = keptHist
-            if (typeof notificationService.saveSoon === "function") {
-              notificationService.saveSoon("history")
-            }
-          }
-        }
-        if (Array.isArray(notificationService.liveEntries)) {
-          var keptLive = notificationService.liveEntries.filter(function(e) {
-            if (!e) return false
-            var k = String(e.key || "")
-            if (k && dropKeys[k]) return false
-            var tsMs = Number(e.ts || 0) * 1000
-            return isFinite(tsMs) && tsMs > clearedAt
-          })
-          if (keptLive.length !== notificationService.liveEntries.length) {
-            notificationService.liveEntries = keptLive
-            if (typeof notificationService.saveSoon === "function") {
-              notificationService.saveSoon("live")
-            }
-          }
-        }
-      }
-
-      pruneService()
-      Qt.callLater(pruneService)
-    }
+    // Omarchy gives plugins no way to edit its notification history (bar
+    // plugins get a do-not-disturb proxy only), so Glance cannot delete rows
+    // from history.json. The tombstone written below hides them here and in
+    // the unread count; Omarchy drops them itself after its 24 h retention.
+    // Cards still on screen are closed through the public IPC target.
+    Quickshell.execDetached(["omarchy-shell", "-q", "notifications", "dismissAll"])
 
     Quickshell.execDetached(["bash", "-c",
       "unreadbin=\"$1\"; stamp=\"$2\"\n" +
@@ -471,43 +416,6 @@ Item {
     }
 
     localDismissedKeys[key] = true
-
-    if (notificationService) {
-      if (typeof notificationService.closeToast === "function") {
-        notificationService.closeToast(key, "dismissed", true)
-      } else if (typeof notificationService.closeToasts === "function") {
-        notificationService.closeToasts([key], "dismissed", true)
-      }
-
-      var removeKeyFromService = function() {
-        if (!notificationService) return
-        if (Array.isArray(notificationService.historyEntries)) {
-          var nextHist = notificationService.historyEntries.filter(function(e) {
-            return e && String(e.key || "") !== key
-          })
-          if (nextHist.length !== notificationService.historyEntries.length) {
-            notificationService.historyEntries = nextHist
-            if (typeof notificationService.saveSoon === "function") {
-              notificationService.saveSoon("history")
-            }
-          }
-        }
-        if (Array.isArray(notificationService.liveEntries)) {
-          var nextLive = notificationService.liveEntries.filter(function(e) {
-            return e && String(e.key || "") !== key
-          })
-          if (nextLive.length !== notificationService.liveEntries.length) {
-            notificationService.liveEntries = nextLive
-            if (typeof notificationService.saveSoon === "function") {
-              notificationService.saveSoon("live")
-            }
-          }
-        }
-      }
-
-      removeKeyFromService()
-      Qt.callLater(removeKeyFromService)
-    }
 
     Quickshell.execDetached(["bash", "-c",
       "unreadbin=\"$1\"; key=\"$2\"\n" +

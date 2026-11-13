@@ -443,12 +443,15 @@ test("NotificationHistory.qml historyLoader checks regular files, rejects FIFOs/
 
   // Verify Component.onCompleted calls reload(), not refresh()
   assert.match(qml, /Component\.onCompleted:\s*reload\(\)/)
-  // Verify nonexistent stock calls are gone and live service is used
+  // Verify nonexistent stock calls are gone. Plugins get no handle on the
+  // service's history (only a do-not-disturb proxy), so dismissal goes
+  // through the tombstone and the public notifications IPC target.
   assert.equal(qml.includes("clearHistory"), false)
   assert.equal(qml.includes("notifications clear"), false)
-  assert.match(qml, /notificationService\.clearAll/)
-  assert.match(qml, /notificationService\.closeToast/)
-  assert.match(qml, /notificationService\.saveSoon/)
+  assert.equal(/notificationService\.(historyEntries|liveEntries|saveSoon)/.test(qml), false)
+  assert.match(qml, /\["omarchy-shell", "-q", "notifications", "dismissAll"\]/)
+  assert.match(qml, /"clear-all"|clear-all/)
+  assert.match(qml, /dismiss-key/)
   // Verify openNotification runs parseExecArgv before xdg-open, drops entry.image, and passes --
   const openStart = qml.indexOf("function openNotification(")
   const openEnd = qml.indexOf("function launchApp(", openStart)

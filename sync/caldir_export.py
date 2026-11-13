@@ -17,7 +17,6 @@ import tomllib
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
-from urllib.parse import urlsplit
 
 CONTRACT_VERSION = 1
 DEFAULT_OUTPUT = Path("~/.local/state/omarchy/calendar-events.json").expanduser()
@@ -32,9 +31,22 @@ HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 MEETING_HOSTS = (
     "meet.google.com",
     "teams.microsoft.com",
+    "teams.live.com",
     "zoom.us",
     "zoomgov.com",
 )
+# The meeting-link grammar mirrors Model.safeUrl and stock Omarchy's
+# notifications/Security.js (safeHttpUrl, canonicalHostname): a deliberately
+# narrow ASCII spelling that every URL parser reads the same way, rather than
+# whatever urlsplit or a browser happens to tolerate.
+MAX_URL = 4096
+MAX_HOSTNAME = 253
+URL_FORBIDDEN_RE = re.compile(r"[^\x21-\x7e]|[\\<>\"']")
+URL_BAD_ESCAPE_RE = re.compile(r"%(?:0[0-9a-f]|1[0-9a-f]|7f|25|5c)|%(?![0-9a-f]{2})", re.IGNORECASE)
+URL_PARTS_RE = re.compile(r"(https)://([^/?#]+)(.*)", re.IGNORECASE | re.DOTALL)
+AUTHORITY_RE = re.compile(r"([^:%@]+)(?::([0-9]{1,5}))?")
+HOSTNAME_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+")
+NUMERIC_LABEL_RE = re.compile(r"(?:0x[0-9a-f]*|[0-9]+)", re.IGNORECASE)
 ICS_MEETING_PROPERTIES = {
     "URL",
     "CONFERENCE",
@@ -140,18 +152,49 @@ def calendar_metadata(caldir_root: Path) -> dict[str, dict[str, Any]]:
     return metadata
 
 
+def canonical_hostname(raw: str) -> str:
+    if len(raw) > MAX_HOSTNAME:
+        return ""
+    host = raw.lower()
+    if host.endswith("."):
+        host = host[:-1]
+    if not HOSTNAME_RE.fullmatch(host):
+        return ""
+    # A numeric-looking last label makes a WHATWG parser read an IPv4 address.
+    if NUMERIC_LABEL_RE.fullmatch(host.rsplit(".", 1)[-1]):
+        return ""
+    return host
+
+
+def strict_meeting_url(raw: str) -> str:
+    """Return the canonical form of one allowlisted https meeting link, or ""."""
+    if not isinstance(raw, str) or len(raw) > MAX_URL:
+        return ""
+    # No whitespace, controls, non-ASCII, backslashes or quotes anywhere, and
+    # no escapes that decode to a control, a backslash or another escape.
+    if URL_FORBIDDEN_RE.search(raw) or URL_BAD_ESCAPE_RE.search(raw):
+        return ""
+    parts = URL_PARTS_RE.fullmatch(raw)
+    if not parts:
+        return ""
+    # The authority match also refuses userinfo (@) and escapes (%).
+    authority = AUTHORITY_RE.fullmatch(parts.group(2))
+    if not authority:
+        return ""
+    port = authority.group(2)
+    if port is not None and int(port) != 443:
+        return ""
+    host = canonical_hostname(authority.group(1))
+    if not host or not any(host == allowed or host.endswith("." + allowed) for allowed in MEETING_HOSTS):
+        return ""
+    return "https://" + host + (parts.group(3) or "/")
+
+
 def safe_meeting_url(*values: Any) -> str:
     for value in values:
         for match in URL_RE.findall(str(value or "")):
-            candidate = match.rstrip(".,;:!?)]}")
-            try:
-                parts = urlsplit(candidate)
-            except ValueError:
-                continue
-            host = (parts.hostname or "").lower().rstrip(".")
-            if parts.scheme.lower() != "https" or not host:
-                continue
-            if any(host == allowed or host.endswith("." + allowed) for allowed in MEETING_HOSTS):
+            candidate = strict_meeting_url(match.rstrip(".,;:!?)]}"))
+            if candidate:
                 return candidate
     return ""
 

@@ -355,13 +355,45 @@ function isDeclined(event) {
   return !!event && String(event.responseStatus || "") === "declined"
 }
 
-// Only https is ever launched. A meeting link is supplied by whoever sent the
-// invitation, so treating it as trusted input would be a mistake.
+// Only https links to a known meeting host are ever launched. A meeting link
+// is supplied by whoever sent the invitation, and calendar-events.json can be
+// written by anything, so this is the last gate before Qt.openUrlExternally.
+// The grammar is the exporter's (sync/caldir_export.py strict_meeting_url),
+// modelled on stock Omarchy's notifications/Security.js: one narrow ASCII
+// spelling that every URL parser reads the same way. The result is the
+// canonical string, which is what gets launched.
+var MEETING_HOSTS = ["meet.google.com", "teams.microsoft.com", "teams.live.com", "zoom.us", "zoomgov.com"]
+var MAX_MEETING_URL = 4096
+var MAX_MEETING_HOSTNAME = 253
+
+function meetingHostname(raw) {
+  if (typeof raw !== "string" || raw.length > MAX_MEETING_HOSTNAME) return ""
+  var host = raw.toLowerCase().replace(/\.$/, "")
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/.test(host)) return ""
+  // A numeric-looking last label makes a WHATWG parser read an IPv4 address.
+  if (/^(?:0x[0-9a-f]*|[0-9]+)$/i.test(host.split(".").pop())) return ""
+  for (var i = 0; i < MEETING_HOSTS.length; i++) {
+    var allowed = MEETING_HOSTS[i]
+    if (host === allowed || host.slice(-(allowed.length + 1)) === "." + allowed) return host
+  }
+  return ""
+}
+
 function safeUrl(url) {
-  var text = String(url || "").trim()
-  if (text.indexOf("https://") !== 0) return ""
-  if (/[\s"'<>]/.test(text)) return ""
-  return text
+  if (typeof url !== "string" || url.length > MAX_MEETING_URL) return ""
+  // No whitespace, controls, non-ASCII, backslashes or quotes anywhere, and
+  // no escapes that decode to a control, a backslash or another escape.
+  if (/[^\x21-\x7e]|[\\<>"']/.test(url)) return ""
+  if (/%(?:0[0-9a-f]|1[0-9a-f]|7f|25|5c)|%(?![0-9a-f]{2})/i.test(url)) return ""
+  var parts = url.match(/^(https):\/\/([^\/?#]+)([^]*)$/i)
+  if (!parts) return ""
+  // No userinfo (@), no escapes (%) in the authority; port absent or 443.
+  var authority = parts[2].match(/^([^:%@]+)(?::([0-9]{1,5}))?$/)
+  if (!authority) return ""
+  if (authority[2] !== undefined && authority[2] !== "" && Number(authority[2]) !== 443) return ""
+  var host = meetingHostname(authority[1])
+  if (!host) return ""
+  return "https://" + host + (parts[3] || "/")
 }
 
 // Turn the QML file URL of a bundled script into something a person can paste.

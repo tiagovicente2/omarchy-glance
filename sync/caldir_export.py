@@ -10,12 +10,14 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import tomllib
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
+from time import monotonic, sleep
 from typing import Any, Iterable
 
 CONTRACT_VERSION = 1
@@ -84,6 +86,17 @@ PROVIDER_DIRS = (
     Path("/usr/lib/renCal/providers"),
 )
 PULL_TIMEOUT_SECONDS = 120
+EVENTS_TIMEOUT_SECONDS = 60
+KILL_GRACE_SECONDS = 2.0
+MAX_ERROR_CHARS = 200
+
+
+class CaldirMissing(Exception):
+    """The caldir binary could not be found (exit code 3)."""
+
+
+class CaldirFailed(ValueError):
+    """caldir ran and failed; the message is caldir's own error line."""
 
 
 def provider_environment() -> dict[str, str]:
@@ -94,19 +107,97 @@ def provider_environment() -> dict[str, str]:
     return env
 
 
+def caldir_error_line(stderr: str, stdout: str, returncode: int) -> str:
+    """caldir's own message, never a Python repr of the command.
+
+    caldir prints "Error: <what>" and then hints or a cause chain, so its first
+    "Error:" line says the most. Anything else falls back to the last line.
+    """
+    lines = [line.strip() for line in (stderr or stdout or "").splitlines() if line.strip()]
+    for line in lines:
+        if line.lower().startswith("error:"):
+            message = line[len("error:"):].strip()
+            if message:
+                return message[:MAX_ERROR_CHARS]
+    return lines[-1][:MAX_ERROR_CHARS] if lines else f"exit status {returncode}"
+
+
+def process_group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def wait_for_group_exit(proc: subprocess.Popen, pgid: int) -> bool:
+    deadline = monotonic() + KILL_GRACE_SECONDS
+    while monotonic() < deadline:
+        proc.poll()  # reap the direct child; a zombie still counts as alive
+        if not process_group_alive(pgid):
+            return True
+        sleep(0.05)
+    return False
+
+
+def terminate_process_group(proc: subprocess.Popen) -> None:
+    """Stop caldir and every provider it started: TERM, then KILL."""
+    pgid = proc.pid
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pgid, sig)
+        except ProcessLookupError:
+            break
+        if wait_for_group_exit(proc, pgid):
+            break
+    try:
+        proc.communicate(timeout=KILL_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        # Something left the group and still holds the pipes; stop waiting.
+        for stream in (proc.stdout, proc.stderr):
+            if stream:
+                stream.close()
+        proc.wait()
+
+
+def run_caldir_command(binary: str, args: list[str], timeout: float) -> str:
+    """Run caldir in its own process group and return stdout.
+
+    Raises CaldirMissing when the binary does not exist and CaldirFailed with
+    caldir's own error line on a non-zero exit or a timeout.
+    """
+    try:
+        proc = subprocess.Popen(
+            [binary, *args],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=provider_environment(),
+            start_new_session=True,
+        )
+    except FileNotFoundError as error:
+        raise CaldirMissing(binary) from error
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        terminate_process_group(proc)
+        raise CaldirFailed(f"timed out after {timeout:g} seconds") from None
+    except BaseException:
+        terminate_process_group(proc)
+        raise
+    if proc.returncode != 0:
+        raise CaldirFailed(caldir_error_line(stderr, stdout, proc.returncode))
+    return stdout
+
+
 def pull_calendars(binary: str) -> None:
     """Fetch remote changes into the local caldir. Read-only: never pushes."""
-    result = subprocess.run(
-        [binary, "pull"],
-        capture_output=True,
-        text=True,
-        timeout=PULL_TIMEOUT_SECONDS,
-        env=provider_environment(),
-        stdin=subprocess.DEVNULL,
-    )
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip().splitlines()
-        raise ValueError(detail[-1][:200] if detail else f"exit status {result.returncode}")
+    run_caldir_command(binary, ["pull"], PULL_TIMEOUT_SECONDS)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -429,16 +520,8 @@ def normalize_events(
 
 
 def run_caldir(binary: str, from_date: str, to_date: str) -> list[dict[str, Any]]:
-    result = subprocess.run(
-        [binary, "--json", "events", "--from", from_date, "--to", to_date],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=60,
-        env=provider_environment(),
-        stdin=subprocess.DEVNULL,
-    )
-    parsed = json.loads(result.stdout)
+    stdout = run_caldir_command(binary, ["--json", "events", "--from", from_date, "--to", to_date], EVENTS_TIMEOUT_SECONDS)
+    parsed = json.loads(stdout)
     if not isinstance(parsed, list):
         raise ValueError("caldir JSON output is not an array")
     return parsed
@@ -572,8 +655,14 @@ def main(argv: list[str] | None = None) -> int:
         if pull_error is not None:
             print(f"caldir pull failed: {pull_error}", file=sys.stderr)
             return 2
-    except (OSError, ValueError, subprocess.SubprocessError, json.JSONDecodeError) as error:
-        print(f"caldir export failed: {error}", file=sys.stderr)
+    except CaldirMissing as error:
+        print(f"caldir export failed: caldir not found: {str(error)[:MAX_ERROR_CHARS]}", file=sys.stderr)
+        return 3
+    except json.JSONDecodeError:
+        print("caldir export failed: caldir returned invalid JSON", file=sys.stderr)
+        return 1
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        print(f"caldir export failed: {str(error)[:MAX_ERROR_CHARS]}", file=sys.stderr)
         return 1
     finally:
         if lock_handle is not None:

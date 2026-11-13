@@ -195,3 +195,33 @@ test("syncState judges staleness by pulledAt when present", () => {
   assert.equal(Model.syncState({ syncedAt: "2026-11-12T11:59:00Z", pulledAt: "2026-11-12T10:00:00Z" }, now, 300), "stale")
   assert.equal(Model.syncState({ syncedAt: "2026-11-12T11:59:00Z", pulledAt: null }, now, 300), "ok")
 })
+
+test("countdownText fills the catalog's plural forms with formatted numbers", () => {
+  // QML strings carry .arg(), which fills the lowest-numbered %N; give the
+  // test strings the same method.
+  const withArg = (text) => Object.assign(new String(text), {
+    arg(value) {
+      const marks = String(this).match(/%\d/g) || []
+      if (marks.length === 0) return withArg(String(this))
+      const lowest = marks.sort()[0]
+      return withArg(String(this).split(lowest).join(String(value)))
+    }
+  })
+  const catalog = {
+    t: (key) => withArg({ "countdown.now": "agora", "countdown.hoursMinutes": "em %1 h %2 min" }[key]),
+    tn: (key, n) => withArg({ "countdown.minutes": n === 1 ? "em %1 minuto" : "em %1 min", "countdown.hours": "em %1 h" }[key])
+  }
+  const arabic = { formatNumber: (n) => String(n).replace(/[0-9]/g, (d) => String.fromCharCode(0x660 + Number(d))) }
+  assert.equal(String(Model.countdownText(null, catalog, arabic)), "")
+  assert.equal(String(Model.countdownText(Model.formatCountdown(1000), catalog, arabic)), "agora")
+  assert.equal(String(Model.countdownText(Model.formatCountdown(60 * 1000), catalog, arabic)), "em \u0661 minuto")
+  assert.equal(String(Model.countdownText(Model.formatCountdown(12 * 60 * 1000), catalog, arabic)), "em \u0661\u0662 min")
+  assert.equal(String(Model.countdownText(Model.formatCountdown(3 * 3600 * 1000), catalog, arabic)), "em \u0663 h")
+  assert.equal(String(Model.countdownText(Model.formatCountdown(75 * 60 * 1000), catalog, arabic)), "em \u0661 h \u0661\u0665 min")
+})
+
+test("exporterCommand pulls through the exporter's rate limit, forces only on request", () => {
+  assert.deepEqual(Model.exporterCommand("/x", false, "force", 300), ["/x"])
+  assert.deepEqual(Model.exporterCommand("/x", true, "pull", 300), ["/x", "--pull", "--pull-interval", "300"])
+  assert.deepEqual(Model.exporterCommand("/x", true, "force", 300), ["/x", "--force-pull"])
+})

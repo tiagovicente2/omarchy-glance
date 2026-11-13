@@ -394,6 +394,17 @@ function exportErrorText(stderrText) {
   return text.length > MAX_EXPORT_ERROR ? text.substring(0, MAX_EXPORT_ERROR - 1) + "…" : text
 }
 
+// The exporter command line. With sync off it only exports what is on disk.
+// With sync on, "pull" asks for a pull that the exporter skips when the last
+// successful one is younger than intervalSeconds, so the timer and every panel
+// open stay cheap; "force" (sync just turned on) pulls regardless.
+function exporterCommand(exporterPath, syncOn, mode, intervalSeconds) {
+  if (!syncOn) return [exporterPath]
+  if (mode === "force") return [exporterPath, "--force-pull"]
+  var interval = Math.max(0, Math.floor(Number(intervalSeconds) || 0))
+  return [exporterPath, "--pull", "--pull-interval", String(interval)]
+}
+
 // null means "leave the panel's state as it is" (lock busy).
 function exportOutcome(exitCode, stderrText) {
   var code = Number(exitCode)
@@ -595,6 +606,21 @@ function formatCountdown(deltaMs) {
     : { key: "hoursMinutes", hours: hours, minutes: rest }
 }
 
+// The countdown in the user's language. `catalog` is the plugin's
+// Commons.Translations and `numbers` is Commons.I18n; both are passed in so
+// this stays testable. Call it inside a binding so a language switch
+// re-renders it.
+function countdownText(countdown, catalog, numbers) {
+  if (!countdown || !catalog) return ""
+  var fmt = function(n) { return numbers ? numbers.formatNumber(n) : String(n) }
+  if (countdown.key === "now") return catalog.t("countdown.now")
+  if (countdown.key === "minutes")
+    return catalog.tn("countdown.minutes", countdown.minutes).arg(fmt(countdown.minutes))
+  if (countdown.key === "hours")
+    return catalog.tn("countdown.hours", countdown.hours).arg(fmt(countdown.hours))
+  return catalog.t("countdown.hoursMinutes").arg(fmt(countdown.hours)).arg(fmt(countdown.minutes))
+}
+
 var MAX_ANNOUNCE_TITLE = 28
 
 // A bar label is a fixed budget of horizontal space shared with every other
@@ -698,6 +724,7 @@ if (typeof module !== "undefined") {
     sanitizeEventsDocument: sanitizeEventsDocument,
     exportErrorText: exportErrorText,
     exportOutcome: exportOutcome,
+    exporterCommand: exporterCommand,
     MAX_EVENTS: MAX_EVENTS,
     dateKey: dateKey,
     keyForDate: keyForDate,
@@ -729,6 +756,7 @@ if (typeof module !== "undefined") {
     nextEvent: nextEvent,
     nextEventToday: nextEventToday,
     formatCountdown: formatCountdown,
+    countdownText: countdownText,
     truncateTitle: truncateTitle,
     announceLabel: announceLabel,
     millisUntil: millisUntil,

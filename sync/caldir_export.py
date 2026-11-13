@@ -28,6 +28,14 @@ DEFAULT_COLOR_PALETTE = (
 )
 URL_RE = re.compile(r"https://[^\s<>\"']+", re.IGNORECASE)
 HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+# A subscribed feed (caldir's webcal provider) controls every field, and the
+# shell parses the result on its GUI thread, so everything written is bounded.
+MAX_TITLE_CHARS = 512
+MAX_LOCATION_CHARS = 512
+MAX_CALENDAR_NAME_CHARS = 128
+MAX_ID_CHARS = 512
+MAX_EVENTS = 5000
+MAX_DOCUMENT_BYTES = 8 * 1024 * 1024
 MEETING_HOSTS = (
     "meet.google.com",
     "teams.microsoft.com",
@@ -328,11 +336,15 @@ def normalized_event(
     if not isinstance(raw, dict):
         return []
     instance_id = str(raw.get("instance_id") or "").strip()
-    title = str(raw.get("title") or "").strip()
+    title = str(raw.get("title") or "").strip()[:MAX_TITLE_CHARS]
     start = str(raw.get("start") or "").strip()
     end = str(raw.get("end") or start).strip()
     slug = str(raw.get("calendar") or "").strip()
     if not instance_id or not title or not start or not slug:
+        return []
+    # Identifiers and timestamps cannot be shortened without changing their
+    # meaning, so an oversized one drops the event instead.
+    if any(len(value) > MAX_ID_CHARS for value in (instance_id, start, end, slug)):
         return []
 
     all_day = bool(raw.get("all_day", False))
@@ -349,13 +361,13 @@ def normalized_event(
     base: dict[str, Any] = {
         "id": instance_id,
         "calendarId": slug,
-        "calendarName": str(cal.get("name") or slug),
+        "calendarName": str(cal.get("name") or slug)[:MAX_CALENDAR_NAME_CHARS],
         "color": str(cal.get("color") or fallback_color(slug)),
         "start": start,
         "end": end,
         "allDay": all_day,
         "title": title,
-        "location": str(raw.get("location") or ""),
+        "location": str(raw.get("location") or "")[:MAX_LOCATION_CHARS],
     }
     if meeting_url:
         base["meetingUrl"] = meeting_url
@@ -405,7 +417,9 @@ def normalize_events(
         row["title"].casefold(),
         row["id"],
     ))
-    return rows
+    # Keep the earliest rows: the window starts in the past, so the cut falls
+    # on the far future rather than on today.
+    return rows[:MAX_EVENTS]
 
 
 def run_caldir(binary: str, from_date: str, to_date: str) -> list[dict[str, Any]]:
@@ -434,6 +448,17 @@ def validate_document(document: Any) -> None:
     events = document.get("events")
     if not isinstance(events, list):
         raise ValueError("events must be an array")
+    if len(events) > MAX_EVENTS:
+        raise ValueError(f"more than {MAX_EVENTS} events")
+    limits = {
+        "id": MAX_ID_CHARS,
+        "calendarId": MAX_ID_CHARS,
+        "start": MAX_ID_CHARS,
+        "end": MAX_ID_CHARS,
+        "title": MAX_TITLE_CHARS,
+        "location": MAX_LOCATION_CHARS,
+        "calendarName": MAX_CALENDAR_NAME_CHARS,
+    }
     required = ("id", "calendarId", "calendarName", "color", "dateKey", "start", "end", "allDay", "title", "location")
     for index, event in enumerate(events):
         if not isinstance(event, dict):
@@ -441,6 +466,9 @@ def validate_document(document: Any) -> None:
         for field in required:
             if field not in event:
                 raise ValueError(f"events[{index}].{field} is missing")
+        for field, limit in limits.items():
+            if not isinstance(event[field], str) or len(event[field]) > limit:
+                raise ValueError(f"events[{index}].{field} is invalid or too long")
         if not HEX_COLOR_RE.fullmatch(str(event["color"])):
             raise ValueError(f"events[{index}].color is invalid")
         if parse_date_value(event["dateKey"]) is None or len(str(event["dateKey"])) != 10:
@@ -471,12 +499,20 @@ def build_document(
     return document
 
 
+def encode_document(document: dict[str, Any]) -> bytes:
+    validate_document(document)
+    payload = (json.dumps(document, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    if len(payload) > MAX_DOCUMENT_BYTES:
+        raise ValueError(f"export is larger than {MAX_DOCUMENT_BYTES // (1024 * 1024)} MB; not written")
+    return payload
+
+
 def atomic_write(path: Path, document: dict[str, Any]) -> None:
+    payload = encode_document(document)
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(document, ensure_ascii=False, indent=2) + "\n"
     fd, temporary = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        with os.fdopen(fd, "wb") as handle:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())

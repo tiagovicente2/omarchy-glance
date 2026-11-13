@@ -21,6 +21,15 @@ from time import monotonic, sleep
 from typing import Any, Iterable
 
 CONTRACT_VERSION = 1
+
+# Exit codes, shared with Panel.qml. Python and argparse exit 1 and 2 on their
+# own, so the outcomes the panel acts on use codes they never produce.
+EXIT_OK = 0
+EXIT_FAILED = 1
+EXIT_CALDIR_MISSING = 3
+EXIT_PULL_FAILED = 10
+EXIT_BUSY = 75
+DEFAULT_PULL_INTERVAL_SECONDS = 300
 DEFAULT_OUTPUT = Path("~/.local/state/omarchy/calendar-events.json").expanduser()
 DEFAULT_PAST_DAYS = 7
 DEFAULT_FUTURE_DAYS = 60
@@ -202,13 +211,42 @@ def pull_calendars(binary: str) -> None:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     today = date.today()
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = ExporterArgumentParser(description=__doc__)
     parser.add_argument("--caldir-bin", default=default_caldir_binary())
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--from", dest="from_date", default=(today - timedelta(days=DEFAULT_PAST_DAYS)).isoformat())
     parser.add_argument("--to", dest="to_date", default=(today + timedelta(days=DEFAULT_FUTURE_DAYS)).isoformat())
-    parser.add_argument("--pull", action="store_true", help="run caldir pull before exporting")
+    parser.add_argument(
+        "--pull",
+        action="store_true",
+        help="run caldir pull first, unless the last successful pull is newer than --pull-interval",
+    )
+    parser.add_argument(
+        "--pull-interval",
+        type=non_negative_int,
+        default=DEFAULT_PULL_INTERVAL_SECONDS,
+        metavar="SECONDS",
+        help=f"minimum age of the last successful pull before --pull pulls again (default {DEFAULT_PULL_INTERVAL_SECONDS})",
+    )
+    parser.add_argument("--force-pull", action="store_true", help="run caldir pull regardless of --pull-interval")
     return parser.parse_args(argv)
+
+
+class ExporterArgumentParser(argparse.ArgumentParser):
+    """argparse exits 2 on a usage error; the panel's contract wants 1."""
+
+    def error(self, message: str):  # type: ignore[override]
+        self.exit(EXIT_FAILED, f"caldir export failed: {message[:MAX_ERROR_CHARS]}\n")
+
+
+def non_negative_int(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be a whole number of seconds") from None
+    if number < 0:
+        raise argparse.ArgumentTypeError("must not be negative")
+    return number
 
 
 def read_toml(path: Path) -> dict[str, Any]:
@@ -534,6 +572,9 @@ def validate_document(document: Any) -> None:
         raise ValueError("missing syncedAt")
     if not isinstance(document.get("source"), str) or not document["source"]:
         raise ValueError("missing source")
+    pulled_at = document.get("pulledAt")
+    if pulled_at is not None and (not isinstance(pulled_at, str) or parse_iso_utc(pulled_at) is None):
+        raise ValueError("pulledAt is invalid")
     events = document.get("events")
     if not isinstance(events, list):
         raise ValueError("events must be an array")
@@ -569,6 +610,20 @@ def validate_document(document: Any) -> None:
             raise ValueError(f"events[{index}].meetingUrl is unsafe")
 
 
+def iso_utc(moment: datetime) -> str:
+    return moment.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def parse_iso_utc(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value or len(value) > 64:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
 def build_document(
     raw_events: Any,
     metadata: dict[str, dict[str, Any]],
@@ -576,11 +631,13 @@ def build_document(
     meeting_urls: dict[tuple[str, str], str] | None = None,
     from_date: date | None = None,
     to_date: date | None = None,
+    pulled_at: datetime | None = None,
 ) -> dict[str, Any]:
     timestamp = now or datetime.now(timezone.utc)
     document = {
         "version": CONTRACT_VERSION,
-        "syncedAt": timestamp.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "syncedAt": iso_utc(timestamp),
+        "pulledAt": iso_utc(pulled_at) if pulled_at else None,
         "source": "caldir",
         "events": normalize_events(raw_events, metadata, meeting_urls, from_date, to_date),
     }
@@ -626,6 +683,38 @@ def acquire_export_lock(output: Path):
     return handle
 
 
+def previous_pulled_at(output: Path) -> datetime | None:
+    """The last successful pull recorded in the current export, if any."""
+    try:
+        with output.open("rb") as handle:
+            payload = handle.read(MAX_DOCUMENT_BYTES + 1)
+        if len(payload) > MAX_DOCUMENT_BYTES:
+            return None
+        document = json.loads(payload)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(document, dict) or document.get("version") != CONTRACT_VERSION:
+        return None
+    return parse_iso_utc(document.get("pulledAt"))
+
+
+def pull_is_due(pulled_at: datetime | None, now: datetime, interval_seconds: int) -> bool:
+    if pulled_at is None:
+        return True
+    age = (now - pulled_at).total_seconds()
+    # A pull stamped in the future means the clock moved; do not trust it.
+    return age < 0 or age >= interval_seconds
+
+
+def describe_error(error: BaseException) -> str:
+    if isinstance(error, json.JSONDecodeError):
+        return "caldir returned invalid JSON"
+    if isinstance(error, OSError) and error.strerror:
+        detail = f"{error.strerror}: {error.filename}" if error.filename else error.strerror
+        return detail[:MAX_ERROR_CHARS]
+    return (str(error) or type(error).__name__)[:MAX_ERROR_CHARS]
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     output = args.output.expanduser()
@@ -633,41 +722,53 @@ def main(argv: list[str] | None = None) -> int:
     try:
         lock_handle = acquire_export_lock(output)
         if lock_handle is None:
-            return 0
-        config_path = default_config_path().resolve()
-        root = configured_caldir(config_path)
+            # Another panel is exporting. Nothing done; the caller keeps its
+            # current state and tries again later.
+            return EXIT_BUSY
         from_date = date.fromisoformat(args.from_date)
         to_date = date.fromisoformat(args.to_date)
         if to_date < from_date:
             raise ValueError("--to must not be before --from")
+        config_path = default_config_path().resolve()
+        root = configured_caldir(config_path)
+        now = datetime.now(timezone.utc)
+        pulled_at = previous_pulled_at(output)
         pull_error = None
-        if args.pull:
+        if args.force_pull or (args.pull and pull_is_due(pulled_at, now, args.pull_interval)):
             try:
                 pull_calendars(args.caldir_bin)
+                pulled_at = datetime.now(timezone.utc)
             except (OSError, ValueError, subprocess.SubprocessError) as error:
                 # Still export what is on disk; report the pull failure after.
                 pull_error = error
         metadata = calendar_metadata(root)
         meeting_urls = ics_meeting_urls(root)
         raw = run_caldir(args.caldir_bin, args.from_date, args.to_date)
-        document = build_document(raw, metadata, meeting_urls=meeting_urls, from_date=from_date, to_date=to_date)
+        document = build_document(
+            raw,
+            metadata,
+            meeting_urls=meeting_urls,
+            from_date=from_date,
+            to_date=to_date,
+            pulled_at=pulled_at,
+        )
         atomic_write(output, document)
         if pull_error is not None:
-            print(f"caldir pull failed: {pull_error}", file=sys.stderr)
-            return 2
+            print(f"caldir pull failed: {describe_error(pull_error)}", file=sys.stderr)
+            return EXIT_PULL_FAILED
     except CaldirMissing as error:
         print(f"caldir export failed: caldir not found: {str(error)[:MAX_ERROR_CHARS]}", file=sys.stderr)
-        return 3
-    except json.JSONDecodeError:
-        print("caldir export failed: caldir returned invalid JSON", file=sys.stderr)
-        return 1
+        return EXIT_CALDIR_MISSING
     except (OSError, ValueError, subprocess.SubprocessError) as error:
-        print(f"caldir export failed: {str(error)[:MAX_ERROR_CHARS]}", file=sys.stderr)
-        return 1
+        print(f"caldir export failed: {describe_error(error)}", file=sys.stderr)
+        return EXIT_FAILED
+    except Exception as error:  # noqa: BLE001 - the panel needs one clean line, not a traceback
+        print(f"caldir export failed: {type(error).__name__}: {describe_error(error)}", file=sys.stderr)
+        return EXIT_FAILED
     finally:
         if lock_handle is not None:
             lock_handle.close()
-    return 0
+    return EXIT_OK
 
 
 if __name__ == "__main__":

@@ -2,6 +2,12 @@
   "bar.newNotifications": { "one": "%1 new notification", "other": "%1 new notifications" },
   "bar.toggleFormatHint": "Right-click to toggle format",
 
+  "countdown.now": "now",
+  "countdown.minutes": { "one": "in %1 min", "other": "in %1 min" },
+  "countdown.hours": { "one": "in %1 h", "other": "in %1 h" },
+  "countdown.hoursMinutes": "in %1 h %2 min",
+
+
   "panel.backToCalendar": "Back to calendar",
   "panel.settings": "Settings",
   "panel.backToToday": "Back to today",
@@ -25,6 +31,10 @@
   "panel.syncVersion": "Events file was written by a newer version. Update the plugin.",
   "panel.syncStale": "Calendar data is stale. Turn on Sync calendars in Settings, or run caldir pull.",
   "panel.nothingScheduled": "Nothing scheduled",
+  "panel.dayMonthFormat": "MMMM d",
+  "panel.monthYear": "%1 %2",
+  "panel.agendaDayFormat": "dddd d MMMM",
+
 
   "notifications.title": "Recent notifications",
   "notifications.dismissAll": "Dismiss all",
@@ -51,10 +61,10 @@
   "settings.leadMinutes": "%1min",
   "settings.sync": "SYNC",
   "settings.syncCalendars": "Sync calendars",
-  "settings.syncCalendarsHint": "Runs caldir pull every five minutes while Omarchy is running",
+  "settings.syncCalendarsHint": "Runs caldir pull at most every five minutes, also when you open the panel",
   "settings.exportFailed": "Calendar export failed:\n%1",
   "settings.pullFailed": "Calendar sync failed:\n%1",
-  "settings.syncMissing": "No calendar events found. Run caldir connect.",
+  "settings.syncMissing": "No calendar events found. Install caldir and run caldir connect.",
   "settings.syncVersion": "The events file was written by a newer version of this plugin.",
   "settings.eventRows": { "one": "%1 event row from %2", "other": "%1 event rows from %2" },
   "settings.syncStale": "Data is stale. Turn on Sync calendars above, or run caldir pull.",

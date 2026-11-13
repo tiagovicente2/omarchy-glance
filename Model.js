@@ -1,7 +1,7 @@
 // Pure date and format math for the clock widget and its calendar panel.
 // Everything here is locale- and Qt-free so it can be unit tested under node
-// (test/shell.d/clock-test.sh); the QML owns month/weekday naming through
-// Qt.locale().
+// (node --test tests/model.test.js); the QML owns month/weekday naming
+// through Qt.locale() and every displayed string through its i18n catalogs.
 
 var MS_PER_DAY = 86400000
 
@@ -231,10 +231,16 @@ function lifeProgressPercent(age, expectancy) {
 // Always six rows of seven days. A fixed grid keeps the popup exactly the
 // same height in every month, so stepping through the year never makes the
 // panel jump under the pointer.
+//
+// Walked in UTC, as stock Omarchy's clock does. A local walk breaks wherever
+// daylight saving starts at midnight (Santiago, Havana, Cairo, Beirut, the
+// Azores): that midnight does not exist, new Date(y, m, d) lands on 23:00 the
+// day before, and the grid repeats a day and shifts every later weekday.
+// UTC has no gaps, and only calendar fields are read back off the cursor.
 function monthGrid(year, month, weekStart, todayKey, eventIndex) {
   var start = normalizedWeekStart(weekStart, 1)
-  var leading = (new Date(year, month, 1).getDay() - start + 7) % 7
-  var cursor = new Date(year, month, 1 - leading)
+  var leading = (new Date(Date.UTC(year, month, 1)).getUTCDay() - start + 7) % 7
+  var cursor = new Date(Date.UTC(year, month, 1 - leading))
   var today = String(todayKey || "")
   var weeks = []
 
@@ -242,10 +248,10 @@ function monthGrid(year, month, weekStart, todayKey, eventIndex) {
     var days = []
     var thursday = null
     for (var d = 0; d < 7; d++) {
-      var cellYear = cursor.getFullYear()
-      var cellMonth = cursor.getMonth()
-      var cellDay = cursor.getDate()
-      var weekday = cursor.getDay()
+      var cellYear = cursor.getUTCFullYear()
+      var cellMonth = cursor.getUTCMonth()
+      var cellDay = cursor.getUTCDate()
+      var weekday = cursor.getUTCDay()
       var key = dateKey(cellYear, cellMonth, cellDay)
       if (weekday === 4) thursday = { year: cellYear, month: cellMonth, day: cellDay }
       days.push({
@@ -260,7 +266,7 @@ function monthGrid(year, month, weekStart, todayKey, eventIndex) {
         hasEvent: eventIndex ? !!eventIndex[key] : false,
         dots: eventIndex ? eventColors(eventIndex, key, 3) : []
       })
-      cursor.setDate(cursor.getDate() + 1)
+      cursor.setUTCDate(cursor.getUTCDate() + 1)
     }
     // Number every row by the ISO week owning its Thursday. That is the
     // definition itself for Monday-start weeks, and the only answer that
@@ -275,15 +281,139 @@ function monthGrid(year, month, weekStart, todayKey, eventIndex) {
   return weeks
 }
 
+// Milliseconds from nowMs to the next whole step (1000 or 60000), always in
+// (0, step]. Counted on the epoch clock: local wall time repeats an hour when
+// daylight saving ends, and a whole local minute starts on a whole epoch one.
+// From stock Omarchy's clock (plugins/panels/clock/Model.js), for WallClock.qml.
+function msUntilNextTick(nowMs, step) {
+  return step - nowMs % step
+}
+
+// UTC for the same reason as the grid: the month is read back off the date, so
+// a first of the month that has no local midnight would step into the wrong one.
 function stepMonth(year, month, delta) {
-  var target = new Date(year, Number(month) + Number(delta), 1)
-  return { year: target.getFullYear(), month: target.getMonth() }
+  var target = new Date(Date.UTC(year, Number(month) + Number(delta), 1))
+  return { year: target.getUTCFullYear(), month: target.getUTCMonth() }
+}
+
+// A boolean setting. `omarchy bar set ... false` without --json stores the
+// string "false", which a QML bool would read as true.
+function flag(value, fallback) {
+  if (value === true || value === 1 || value === "true" || value === "1") return true
+  if (value === false || value === 0 || value === "false" || value === "0") return false
+  return fallback === true
 }
 
 // Event helpers. The widget renders whatever the sync wrote; none of this
 // knows where the events came from.
 
 var STALE_INTERVAL_MULTIPLIER = 4
+
+// Anything can write calendar-events.json, so the document is shape-checked
+// and bounded before the panel indexes it: a null event or a numeric name
+// would otherwise throw inside the bindings and silently stop the bar.
+var MAX_EVENTS = 2000
+var MAX_TITLE = 500
+var MAX_TEXT = 500
+var MAX_ID = 512
+var MAX_NAME = 200
+var MAX_STAMP = 64
+var MAX_URL = 4096
+
+function boundedString(value, limit) {
+  if (value === undefined || value === null) return ""
+  var text = typeof value === "string" ? value : (typeof value === "object" ? "" : String(value))
+  return text.length > limit ? text.substring(0, limit) : text
+}
+
+function isPlainObject(value) {
+  return !!value && typeof value === "object" && !Array.isArray(value)
+}
+
+function sanitizeEvent(raw) {
+  if (!isPlainObject(raw)) return null
+  if (typeof raw.calendarId !== "string" || typeof raw.dateKey !== "string"
+      || typeof raw.start !== "string" || typeof raw.title !== "string") return null
+  if (raw.calendarId === "" || raw.calendarId.length > MAX_ID) return null
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw.dateKey)) return null
+  if (raw.start.length > MAX_STAMP) return null
+
+  var color = typeof raw.color === "string" && /^#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?$/.test(raw.color) ? raw.color : ""
+  var event = {
+    id: boundedString(raw.id, MAX_ID),
+    calendarId: raw.calendarId,
+    calendarName: boundedString(raw.calendarName, MAX_NAME) || raw.calendarId,
+    color: color,
+    start: raw.start,
+    end: typeof raw.end === "string" && raw.end.length <= MAX_STAMP ? raw.end : raw.start,
+    allDay: raw.allDay === true,
+    title: boundedString(raw.title, MAX_TITLE),
+    location: boundedString(raw.location, MAX_TEXT),
+    dateKey: raw.dateKey,
+    continuation: raw.continuation === true
+  }
+  if (typeof raw.meetingUrl === "string" && raw.meetingUrl.length <= MAX_URL) event.meetingUrl = raw.meetingUrl
+  if (typeof raw.responseStatus === "string" && raw.responseStatus.length <= MAX_STAMP) event.responseStatus = raw.responseStatus
+  return event
+}
+
+// A version-1 document with every event checked, or null when it is not one.
+function sanitizeEventsDocument(parsed) {
+  if (!isPlainObject(parsed) || parsed.version !== 1 || !Array.isArray(parsed.events)) return null
+  var events = []
+  for (var i = 0; i < parsed.events.length && events.length < MAX_EVENTS; i++) {
+    var event = sanitizeEvent(parsed.events[i])
+    if (event) events.push(event)
+  }
+  return {
+    version: 1,
+    syncedAt: boundedString(parsed.syncedAt, MAX_STAMP),
+    pulledAt: typeof parsed.pulledAt === "string" ? boundedString(parsed.pulledAt, MAX_STAMP) : null,
+    source: boundedString(parsed.source, MAX_NAME),
+    events: events
+  }
+}
+
+// ---- Exporter outcome, per the exit codes in sync/caldir-export:
+//      0 ok, 3 caldir missing, 10 exported but the pull failed, 75 another
+//      export holds the lock (keep the current state), anything else failed.
+var EXIT_OK = 0
+var EXIT_CALDIR_MISSING = 3
+var EXIT_PULL_FAILED = 10
+var EXIT_BUSY = 75
+var MAX_EXPORT_ERROR = 300
+
+function exportErrorText(stderrText) {
+  var lines = String(stderrText === undefined || stderrText === null ? "" : stderrText)
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
+    .split("\n")
+    .map(function(line) { return line.trim() })
+    .filter(function(line) { return line !== "" })
+  var text = lines.length > 0 ? lines[lines.length - 1] : ""
+  text = text.replace(/^caldir (?:pull|export) failed: /, "")
+  return text.length > MAX_EXPORT_ERROR ? text.substring(0, MAX_EXPORT_ERROR - 1) + "…" : text
+}
+
+// The exporter command line. With sync off it only exports what is on disk.
+// With sync on, "pull" asks for a pull that the exporter skips when the last
+// successful one is younger than intervalSeconds, so the timer and every panel
+// open stay cheap; "force" (sync just turned on) pulls regardless.
+function exporterCommand(exporterPath, syncOn, mode, intervalSeconds) {
+  if (!syncOn) return [exporterPath]
+  if (mode === "force") return [exporterPath, "--force-pull"]
+  var interval = Math.max(0, Math.floor(Number(intervalSeconds) || 0))
+  return [exporterPath, "--pull", "--pull-interval", String(interval)]
+}
+
+// null means "leave the panel's state as it is" (lock busy).
+function exportOutcome(exitCode, stderrText) {
+  var code = Number(exitCode)
+  if (code === EXIT_BUSY) return null
+  if (code === EXIT_OK) return { error: "", pullFailed: false, caldirMissing: false }
+  if (code === EXIT_CALDIR_MISSING) return { error: "", pullFailed: false, caldirMissing: true }
+  var error = exportErrorText(stderrText) || ("exit status " + code)
+  return { error: error, pullFailed: code === EXIT_PULL_FAILED, caldirMissing: false }
+}
 
 function indexEventsByDate(events) {
   var index = {}
@@ -319,8 +449,8 @@ function calendarsInDocument(doc) {
     byId[id] = true
     ordered.push({
       id: id,
-      name: event.calendarName || id,
-      color: event.color || ""
+      name: String(event.calendarName || id),
+      color: String(event.color || "")
     })
   }
 
@@ -442,6 +572,7 @@ function visibleEvents(events, hidden, options) {
   var visible = []
   for (var i = 0; i < events.length; i++) {
     var event = events[i]
+    if (!event) continue
     if (isCalendarHidden(hidden, event.calendarId)) continue
     if (dropDeclined && isDeclined(event)) continue
     visible.push(event)
@@ -490,17 +621,36 @@ function nextEventToday(events, nowMs, todayKey) {
 }
 
 // Returns null past a day out, which is the caller's signal to show nothing
-// rather than a countdown nobody is acting on.
+// rather than a countdown nobody is acting on. Otherwise the catalog key
+// suffix and the numbers to fill it with; the QML owns the words
+// (countdown.now / .minutes / .hours / .hoursMinutes).
 function formatCountdown(deltaMs) {
   if (deltaMs === null || isNaN(deltaMs) || deltaMs < 0 || deltaMs >= DAY_MS) return null
-  if (deltaMs < MINUTE_MS) return "now"
+  if (deltaMs < MINUTE_MS) return { key: "now", hours: 0, minutes: 0 }
 
   var minutes = Math.floor(deltaMs / MINUTE_MS)
-  if (minutes < 60) return "in " + minutes + "min"
+  if (minutes < 60) return { key: "minutes", hours: 0, minutes: minutes }
 
   var hours = Math.floor(minutes / 60)
   var rest = minutes % 60
-  return rest === 0 ? "in " + hours + "h" : "in " + hours + "h " + rest + "min"
+  return rest === 0
+    ? { key: "hours", hours: hours, minutes: 0 }
+    : { key: "hoursMinutes", hours: hours, minutes: rest }
+}
+
+// The countdown in the user's language. `catalog` is the plugin's
+// Commons.Translations and `numbers` is Commons.I18n; both are passed in so
+// this stays testable. Call it inside a binding so a language switch
+// re-renders it.
+function countdownText(countdown, catalog, numbers) {
+  if (!countdown || !catalog) return ""
+  var fmt = function(n) { return numbers ? numbers.formatNumber(n) : String(n) }
+  if (countdown.key === "now") return catalog.t("countdown.now")
+  if (countdown.key === "minutes")
+    return catalog.tn("countdown.minutes", countdown.minutes).arg(fmt(countdown.minutes))
+  if (countdown.key === "hours")
+    return catalog.tn("countdown.hours", countdown.hours).arg(fmt(countdown.hours))
+  return catalog.t("countdown.hoursMinutes").arg(fmt(countdown.hours)).arg(fmt(countdown.minutes))
 }
 
 var MAX_ANNOUNCE_TITLE = 28
@@ -554,7 +704,9 @@ function shouldAnnounce(event, nowMs, leadMinutes) {
 // Turn a YYYY-MM-DD key back into a local Date, for formatting a heading.
 // Built field by field rather than parsed from the string, because
 // new Date("2026-08-10") is UTC midnight and lands on the previous day for
-// anyone west of Greenwich.
+// anyone west of Greenwich. Local noon, not midnight: midnight does not exist
+// on the day daylight saving starts in Havana or Santiago, and would resolve
+// to 23:00 the day before.
 function dateFromKey(dateKey, fallback) {
   var parts = String(dateKey || "").split("-")
   if (parts.length !== 3) return fallback
@@ -564,7 +716,7 @@ function dateFromKey(dateKey, fallback) {
   var day = parseInt(parts[2], 10)
   if (isNaN(year) || isNaN(month) || isNaN(day)) return fallback
 
-  return new Date(year, month - 1, day)
+  return new Date(year, month - 1, day, 12)
 }
 
 function eventColors(index, dateKey, limit) {
@@ -580,19 +732,32 @@ function eventColors(index, dateKey, limit) {
 }
 
 // "missing" means we have nothing to show and should say so rather than
-// render an empty calendar that looks like a quiet week.
+// render an empty calendar that looks like a quiet week. Freshness is judged
+// by the last successful pull when the document records one: the export runs
+// every few minutes whether or not the pull works, so syncedAt alone would
+// never look old.
 function syncState(doc, nowMs, intervalSeconds) {
   if (!doc || !doc.syncedAt) return "missing"
 
   var syncedMs = Date.parse(doc.syncedAt)
   if (isNaN(syncedMs)) return "missing"
 
+  var pulledMs = doc.pulledAt ? Date.parse(doc.pulledAt) : NaN
+  var freshMs = isNaN(pulledMs) ? syncedMs : pulledMs
+
   var thresholdMs = intervalSeconds * STALE_INTERVAL_MULTIPLIER * 1000
-  return (nowMs - syncedMs) > thresholdMs ? "stale" : "ok"
+  return (nowMs - freshMs) > thresholdMs ? "stale" : "ok"
 }
 
 if (typeof module !== "undefined") {
   module.exports = {
+    msUntilNextTick: msUntilNextTick,
+    flag: flag,
+    sanitizeEventsDocument: sanitizeEventsDocument,
+    exportErrorText: exportErrorText,
+    exportOutcome: exportOutcome,
+    exporterCommand: exporterCommand,
+    MAX_EVENTS: MAX_EVENTS,
     dateKey: dateKey,
     keyForDate: keyForDate,
     normalizedWeekStart: normalizedWeekStart,
@@ -623,6 +788,7 @@ if (typeof module !== "undefined") {
     nextEvent: nextEvent,
     nextEventToday: nextEventToday,
     formatCountdown: formatCountdown,
+    countdownText: countdownText,
     truncateTitle: truncateTitle,
     announceLabel: announceLabel,
     millisUntil: millisUntil,

@@ -65,7 +65,7 @@
       {
         "key": "syncCalendars",
         "type": "boolean",
-        "label": "Sync calendars (runs caldir pull every five minutes)",
+        "label": "Sync calendars (runs caldir pull at most every five minutes, also when you open the panel)",
         "defaultValue": true
       },
       {

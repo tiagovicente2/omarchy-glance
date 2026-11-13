@@ -41,8 +41,8 @@ BarWidget {
   //      panel Loader is active even while closed, so this keeps counting
   //      whether or not anyone has opened the calendar.
   //
-  //      displayDate is driven by SystemClock at minute precision, which is
-  //      exactly the granularity a "in 10min" countdown needs. No extra timer.
+  //      displayDate is driven by WallClock at minute precision, which is
+  //      exactly the granularity a "in 10 min" countdown needs. No extra timer.
   readonly property var visibleEventList: panelLoader.item ? panelLoader.item.visibleEventList : []
   readonly property real nowMs: displayDate.getTime()
 
@@ -51,8 +51,9 @@ BarWidget {
   readonly property bool announcing: announceLeadMinutes > 0
     && Model.shouldAnnounce(upcomingEvent, nowMs, announceLeadMinutes)
 
+  // Built inside the binding so a language switch re-renders it.
   readonly property string countdownPhrase: announcing
-    ? (Model.formatCountdown(Model.millisUntil(upcomingEvent, nowMs)) || "")
+    ? Model.countdownText(Model.formatCountdown(Model.millisUntil(upcomingEvent, nowMs)), strings, Commons.I18n)
     : ""
 
   // The clock stays. This widget replaces the desktop's clock, so trading the
@@ -86,8 +87,13 @@ BarWidget {
       root.bar.shell.updateEntryInline(root.moduleName, entry)
   }
 
+  // Qt has no ISO week token, so the week goes in as a quoted literal, and
+  // Qt prints literals as they are: each digit is mapped to the language's
+  // own digits first, as stock Omarchy's clock does.
   function formatted(date) {
-    return Qt.locale(I18n.formatLocale).toString(date, activeFormat.replace(/ww/g, Model.isoWeekLiteral(date.getFullYear(), date.getMonth(), date.getDate())))
+    var week = Model.isoWeekLiteral(date.getFullYear(), date.getMonth(), date.getDate())
+    week = week.split("").map(function(digit) { return Commons.I18n.formatNumber(digit) }).join("")
+    return Qt.locale(I18n.formatLocale).toString(date, activeFormat.replace(/ww/g, week))
   }
 
   // ---- Calendar popup. Shape contract for shell.summon/hide/toggle
@@ -143,17 +149,70 @@ BarWidget {
     if ("settings" in target) target.settings = root.settings
     if ("anchorItem" in target) target.anchorItem = button
     if ("hostWidget" in target) target.hostWidget = root
+    // The bar injects bar and then settings in one pass, so by the next turn
+    // of the event loop after the bar arrives the settings are real. Until
+    // then setting() answers with fallbacks, and a first export started from
+    // those would pull even for someone who turned sync off.
+    if (root.bar && "settingsReady" in target && !target.settingsReady)
+      Qt.callLater(root.markPanelSettingsReady)
+  }
+
+  function markPanelSettingsReady() {
+    var target = panelLoader.item
+    if (target && root.bar && "settingsReady" in target) target.settingsReady = true
+  }
+
+  // ---- One instance per shell leads. Every monitor's bar builds its own
+  //      copy of this widget, and only one of them should run the
+  //      notification watcher and the exporter timer. ShellIpc already
+  //      elects the first live copy of a target and hands over when it
+  //      goes, so the lead follows that election; the others read the
+  //      shared state the leader pushes to them.
+  readonly property bool leads: clockIpc.enabled
+
+  function peers() {
+    var items = root.bar && typeof root.bar.moduleWidgets === "function"
+      ? root.bar.moduleWidgets(root.moduleName) : []
+    var out = []
+    for (var i = 0; i < items.length; i++)
+      if (items[i] && items[i] !== root) out.push(items[i])
+    return out
+  }
+
+  // The exporter outcome is the same for every monitor, whichever panel ran it.
+  function shareExportOutcome(outcome) {
+    var others = root.peers()
+    for (var i = 0; i < others.length; i++)
+      if (typeof others[i].receiveExportOutcome === "function") others[i].receiveExportOutcome(outcome)
+  }
+
+  function receiveExportOutcome(outcome) {
+    if (panelLoader.item && typeof panelLoader.item.applyExportOutcome === "function")
+      panelLoader.item.applyExportOutcome(outcome)
+  }
+
+  function setUnreadCount(count) {
+    root.unreadCount = count
+  }
+
+  function notificationsChanged() {
+    if (root.opened && panelLoader.item && typeof panelLoader.item.refreshNotifications === "function")
+      panelLoader.item.refreshNotifications()
   }
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
-  onBarChanged: injectPanel()
+  onBarChanged: {
+    injectPanel()
+    // A copy that does not lead asks the leader once it can see its peers.
+    Qt.callLater(root.checkUnread)
+  }
   onSettingsChanged: injectPanel()
 
-  SystemClock {
+  WallClock {
     id: clock
-    precision: root.showsSeconds ? SystemClock.Seconds : SystemClock.Minutes
+    step: root.showsSeconds ? 1000 : 60000
     onDateChanged: root.displayDate = date
   }
 
@@ -168,7 +227,8 @@ BarWidget {
     }
   }
 
-  IpcHandler {
+  ShellIpc {
+    id: clockIpc
     target: "omarchy.clock"
 
     function refresh(): void { root.broadcast("refresh") }
@@ -186,7 +246,14 @@ BarWidget {
   readonly property string unreadScript:
     Qt.resolvedUrl("bin/glance-unread").toString().replace(/^file:\/\//, "")
 
+  // Only the leader counts; it pushes the result to every other copy.
   function checkUnread() {
+    if (!root.leads) {
+      var others = root.peers()
+      for (var i = 0; i < others.length; i++)
+        if (others[i].leads && typeof others[i].checkUnread === "function") others[i].checkUnread()
+      return
+    }
     if (unreadProc.running) return
     unreadProc.command = [unreadScript, "unread"]
     unreadProc.running = true
@@ -206,7 +273,11 @@ BarWidget {
         try {
           var data = JSON.parse(text)
           if (data && data.ok === true) {
-            root.unreadCount = Number(data.unread) || 0
+            var count = Math.max(0, Math.floor(Number(data.unread) || 0))
+            root.unreadCount = count
+            var others = root.peers()
+            for (var i = 0; i < others.length; i++)
+              if (typeof others[i].setUnreadCount === "function") others[i].setUnreadCount(count)
           }
         } catch (e) {}
       }
@@ -217,37 +288,46 @@ BarWidget {
     id: markSeenProc
   }
 
+  // The watcher reports every change (inotify, or its own five-second poll
+  // when inotifywait is missing), so no timer is needed while it runs.
+  // Cleared when the watcher exits and set again by restartWatch, so
+  // `running` stays a binding and a copy that stops leading stops watching.
+  property bool watchArmed: true
+
   Process {
     id: watchProc
     command: [root.unreadScript, "watch"]
-    running: true
+    running: root.leads && root.watchArmed
     stdout: SplitParser {
       onRead: function(line) {
         root.checkUnread()
-        if (root.opened && panelLoader.item && typeof panelLoader.item.refreshNotifications === "function") {
-          panelLoader.item.refreshNotifications()
-        }
+        root.notificationsChanged()
+        var others = root.peers()
+        for (var i = 0; i < others.length; i++)
+          if (typeof others[i].notificationsChanged === "function") others[i].notificationsChanged()
       }
     }
-    onExited: restartWatch.restart()
+    onExited: {
+      root.watchArmed = false
+      restartWatch.restart()
+    }
   }
 
   Timer {
     id: restartWatch
     interval: 5000
-    onTriggered: if (!watchProc.running) watchProc.running = true
+    onTriggered: root.watchArmed = true
   }
 
+  // Only while the watcher is down (between a crash and its restart).
   Timer {
     interval: 10000
-    running: true
+    running: root.leads && !watchProc.running
     repeat: true
     onTriggered: root.checkUnread()
   }
 
-  Component.onCompleted: {
-    root.checkUnread()
-  }
+  onLeadsChanged: if (root.leads) root.checkUnread()
 
   WidgetButton {
     id: button

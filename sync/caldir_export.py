@@ -125,7 +125,8 @@ def read_toml(path: Path) -> dict[str, Any]:
         with path.open("rb") as handle:
             value = tomllib.load(handle)
             return value if isinstance(value, dict) else {}
-    except (OSError, tomllib.TOMLDecodeError):
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        # One unreadable calendar config must not abort the whole export.
         return {}
 
 
@@ -241,27 +242,32 @@ def ics_meeting_urls(caldir_root: Path) -> dict[tuple[str, str], str]:
         except OSError:
             continue
         for path in files:
-            in_event = False
             uid = ""
             meeting_url = ""
+            # Open components, innermost last. Only properties directly on a
+            # VEVENT count: a VALARM inside it may carry its own UID (RFC 9074)
+            # and must not relabel the event.
+            components: list[str] = []
             try:
-                lines = unfolded_ics_lines(path)
-                for line in lines:
-                    upper = line.upper()
-                    if upper == "BEGIN:VEVENT":
-                        in_event = True
-                        uid = ""
-                        meeting_url = ""
-                        continue
-                    if upper == "END:VEVENT":
-                        if uid and meeting_url:
-                            found.setdefault((calendar.name, uid), meeting_url)
-                        in_event = False
-                        continue
-                    if not in_event or ":" not in line:
+                for line in unfolded_ics_lines(path):
+                    if ":" not in line:
                         continue
                     raw_name, value = line.split(":", 1)
                     name = raw_name.split(";", 1)[0].rsplit(".", 1)[-1].upper()
+                    if name == "BEGIN":
+                        components.append(value.strip().upper())
+                        if components[-1] == "VEVENT":
+                            uid = ""
+                            meeting_url = ""
+                        continue
+                    if name == "END":
+                        if components and components[-1] == value.strip().upper():
+                            closed = components.pop()
+                            if closed == "VEVENT" and uid and meeting_url:
+                                found.setdefault((calendar.name, uid), meeting_url)
+                        continue
+                    if not components or components[-1] != "VEVENT":
+                        continue
                     if name == "UID":
                         uid = unescape_ics_text(value.strip())
                     elif name in ICS_MEETING_PROPERTIES and not meeting_url:

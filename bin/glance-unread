@@ -1,44 +1,149 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
 glance_state="$state_home/omarchy-glance"
 popups="$state_home/omarchy/notifications"
 history="$state_home/omarchy/notifications/history"
 
-mkdir -p "$glance_state"
+tombstone_file="$glance_state/tombstone.json"
+seen_file="$glance_state/seen"
+lock_file="$glance_state/.lock"
+
+ensure_private_dir() {
+  local dir="$1"
+  [[ ! -L "$dir" ]] || return 1
+  mkdir -p -- "$dir"
+  [[ -d "$dir" && ! -L "$dir" ]] || return 1
+  chmod 700 -- "$dir"
+}
+
+ensure_private_dir "$glance_state"
+
+atomic_write_file() {
+  local target="$1" content="$2" tmp
+  [[ ! -L "$glance_state" && -d "$glance_state" ]] || return 1
+  if [[ -L "$target" ]]; then
+    rm -f -- "$target"
+  fi
+  tmp=$(mktemp "$glance_state/.tmp.XXXXXX") || return 1
+  chmod 600 -- "$tmp"
+  printf '%s\n' "$content" | tee "$tmp" >/dev/null || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$target"
+}
+
+acquire_lock() {
+  [[ ! -L "$lock_file" ]] || rm -f -- "$lock_file"
+}
 
 get_seen() {
   local seen=0
-  [[ -f "$glance_state/seen" ]] && seen=$(cat "$glance_state/seen" 2>/dev/null || echo 0)
-  [[ "$seen" =~ ^[0-9]+$ ]] || seen=0
+  if [[ -f "$seen_file" && ! -L "$seen_file" ]]; then
+    seen=$(cat -- "$seen_file" 2>/dev/null || echo 0)
+  fi
+  [[ "$seen" =~ ^[0-9]{1,16}$ ]] || seen=0
   echo "$seen"
 }
 
-cmd_unread() {
-  local seen
-  seen=$(get_seen)
+read_tombstone() {
+  if [[ -f "$tombstone_file" && ! -L "$tombstone_file" ]]; then
+    local sz parsed
+    sz=$(stat -c %s -- "$tombstone_file" 2>/dev/null || echo 0)
+    if (( sz > 0 && sz <= 262144 )); then
+      parsed=$(jq -c '
+        if type == "object" then
+          {
+            clearedBefore: ((.clearedBefore // 0) | if type == "number" and isfinite and . >= 0 then floor else 0 end),
+            dismissedKeys: ((.dismissedKeys // []) | if type == "array" then map(select(type == "string" and test("^[A-Za-z0-9_-]{1,120}$"))) | .[-500:] else [] end)
+          }
+        else
+          {clearedBefore: 0, dismissedKeys: []}
+        end
+      ' "$tombstone_file" 2>/dev/null || true)
+      if [[ -n "$parsed" ]]; then
+        printf '%s\n' "$parsed"
+        return 0
+      fi
+    fi
+  fi
+  printf '{"clearedBefore":0,"dismissedKeys":[]}\n'
+}
 
-  local files=()
-  [[ -f "$popups/live.json" && -s "$popups/live.json" ]] && files+=("$popups/live.json")
-  [[ -f "$popups/history.json" && -s "$popups/history.json" ]] && files+=("$popups/history.json")
-
+collect_json_files() {
+  local dir="$1" f sz
+  [[ -d "$dir" && ! -L "$dir" ]] || return 0
   while IFS= read -r f; do
-    [[ -n "$f" && -s "$f" ]] && files+=("$f")
-  done < <(find "$popups" "$history" -maxdepth 1 -type f -name '*.json' ! -name 'live.json' ! -name 'history.json' ! -name 'quiet.json' 2>/dev/null)
+    [[ -n "$f" && ! -L "$f" && -s "$f" ]] || continue
+    sz=$(stat -c %s -- "$f" 2>/dev/null || echo 0)
+    (( sz > 0 && sz <= 5242880 )) || continue
+    jq -e . "$f" >/dev/null 2>&1 && printf '%s\n' "$f"
+  done < <(find "$dir" -maxdepth 1 -type f -name '*.json' ! -name 'live.json' ! -name 'history.json' ! -name 'quiet.json' 2>/dev/null)
+}
+
+cmd_unread() {
+  local seen tomb
+  seen=$(get_seen)
+  tomb=$(read_tombstone)
+
+  local files=() fixed sz f
+  if [[ -d "$popups" && ! -L "$popups" ]]; then
+    for fixed in "$popups/live.json" "$popups/history.json"; do
+      if [[ -f "$fixed" && ! -L "$fixed" && -s "$fixed" ]]; then
+        sz=$(stat -c %s -- "$fixed" 2>/dev/null || echo 0)
+        if (( sz > 0 && sz <= 5242880 )) && jq -e . "$fixed" >/dev/null 2>&1; then
+          files+=("$fixed")
+        fi
+      fi
+    done
+    while IFS= read -r f; do
+      [[ -n "$f" ]] && files+=("$f")
+    done < <(collect_json_files "$popups")
+  fi
+  if [[ -d "$history" && ! -L "$history" ]]; then
+    while IFS= read -r f; do
+      [[ -n "$f" ]] && files+=("$f")
+    done < <(collect_json_files "$history")
+  fi
 
   local count=0
   if (( ${#files[@]} > 0 )); then
     count=$(
-      jq -r -s --argjson seen "$seen" '
+      jq -r -s --argjson seen "$seen" --argjson tomb "$tomb" '
         def to_entries:
           if type == "array" then .[]
           elif type == "object" then .
           else empty
           end;
-        [ .[]? | to_entries | select(.key or .id or .originalId or .ts or .timestamp) | .timestamp = (if .timestamp then .timestamp elif .ts then (.ts * 1000 | floor) else 0 end) ]
-        | unique_by(.key // (.timestamp|tostring))
-        | [ .[] | select(.timestamp > $seen) ]
+        def valid_key:
+          type == "string" and test("^[A-Za-z0-9_-]{1,120}$");
+        ($tomb.clearedBefore // 0) as $cleared
+        | ($tomb.dismissedKeys // []) as $dismissed
+        | [
+            .[]?
+            | to_entries
+            | select(type == "object")
+            | select(.key or .id or .originalId or .ts or .timestamp)
+            | .timestamp = (
+                if (.timestamp | type) == "number" and (.timestamp | isfinite) then (.timestamp | floor)
+                elif (.ts | type) == "number" and (.ts | isfinite) then ((.ts * 1000) | floor)
+                else 0
+                end
+              )
+            | (if has("key") and .key != null then .key
+               else "\(.timestamp)-\(.originalId // .id // 0)"
+               end) as $k
+            | select($k | valid_key)
+            | .key = $k
+          ]
+        | unique_by(.key)
+        | [
+            .[]
+            | select(.timestamp > $seen)
+            | select($cleared <= 0 or .timestamp > $cleared)
+            | .key as $k
+            | select(($dismissed | index($k)) == null)
+          ]
         | length
       ' "${files[@]}" 2>/dev/null || echo 0
     )
@@ -52,16 +157,73 @@ cmd_unread() {
 
 cmd_mark_seen() {
   local stamp="${1:-}"
-  if [[ -z "$stamp" || ! "$stamp" =~ ^[0-9]+$ ]]; then
+  if [[ -z "$stamp" || ! "$stamp" =~ ^[0-9]{1,16}$ ]]; then
     stamp="$(($(date +%s%N) / 1000000))"
   fi
 
-  printf '%s\n' "$stamp" > "$glance_state/seen"
+  acquire_lock
+  (
+    flock -w 5 9 || exit 1
+    atomic_write_file "$seen_file" "$stamp"
+  ) 9>>"$lock_file"
   printf '{"ok":true,"seen":%s}\n' "$stamp"
 }
 
+cmd_dismiss_key() {
+  local key="${1:-}"
+  if [[ ! "$key" =~ ^[A-Za-z0-9_-]{1,120}$ ]]; then
+    echo "Invalid notification key" >&2
+    exit 1
+  fi
+
+  acquire_lock
+  (
+    flock -w 5 9 || exit 1
+    local current updated
+    current=$(read_tombstone)
+    updated=$(jq -cn --argjson tomb "$current" --arg key "$key" '
+      {
+        clearedBefore: ($tomb.clearedBefore // 0),
+        dismissedKeys: (
+          (($tomb.dismissedKeys // []) | map(select(. != $key))) + [$key]
+          | .[-500:]
+        )
+      }
+    ')
+    atomic_write_file "$tombstone_file" "$updated"
+  ) 9>>"$lock_file"
+  printf '{"ok":true,"key":"%s"}\n' "$key"
+}
+
+cmd_clear_all() {
+  local stamp="${1:-}"
+  if [[ -z "$stamp" || ! "$stamp" =~ ^[0-9]{1,16}$ ]]; then
+    stamp="$(($(date +%s%N) / 1000000))"
+  fi
+
+  acquire_lock
+  (
+    flock -w 5 9 || exit 1
+    local current prev_seen new_cleared new_seen updated
+    current=$(read_tombstone)
+    prev_seen=$(get_seen)
+    new_cleared=$(jq -rn --argjson tomb "$current" --argjson s "$stamp" '[($tomb.clearedBefore // 0), $s] | max')
+    if (( stamp > prev_seen )); then
+      new_seen="$stamp"
+    else
+      new_seen="$prev_seen"
+    fi
+    updated=$(jq -cn --argjson c "$new_cleared" '{clearedBefore: $c, dismissedKeys: []}')
+    atomic_write_file "$tombstone_file" "$updated"
+    atomic_write_file "$seen_file" "$new_seen"
+  ) 9>>"$lock_file"
+  printf '{"ok":true,"clearedBefore":%s}\n' "$stamp"
+}
+
 cmd_watch() {
-  mkdir -p "$popups" "$history" "$glance_state"
+  ensure_private_dir "$popups"
+  ensure_private_dir "$history"
+  ensure_private_dir "$glance_state"
 
   command -v inotifywait >/dev/null 2>&1 || {
     while true; do sleep 5; echo "poll"; done
@@ -73,9 +235,12 @@ cmd_watch() {
 }
 
 case "${1:-}" in
-  unread)    cmd_unread ;;
-  mark-seen) shift; cmd_mark_seen "$@" ;;
-  seen)      printf '{"ok":true,"seen":%s}\n' "$(get_seen)" ;;
-  watch)     cmd_watch ;;
-  *)         echo "Usage: glance-unread {unread|mark-seen [timestamp]|seen|watch}" >&2; exit 1 ;;
+  unread)      cmd_unread ;;
+  mark-seen)   shift; cmd_mark_seen "$@" ;;
+  seen)        printf '{"ok":true,"seen":%s}\n' "$(get_seen)" ;;
+  dismiss-key) shift; cmd_dismiss_key "$@" ;;
+  clear-all)   shift; cmd_clear_all "$@" ;;
+  tombstone)   read_tombstone ;;
+  watch)       cmd_watch ;;
+  *)           echo "Usage: glance-unread {unread|mark-seen [timestamp]|seen|dismiss-key <key>|clear-all [timestamp]|tombstone|watch}" >&2; exit 1 ;;
 esac

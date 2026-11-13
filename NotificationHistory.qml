@@ -7,6 +7,7 @@ import Quickshell.Io
 import qs.Commons
 import qs.Commons as Commons
 import qs.Ui
+import "NotificationSafety.js" as Safety
 
 Item {
   id: root
@@ -22,6 +23,9 @@ Item {
   readonly property color hoverColor: Style.hoverFillFor(foreground, Color.accent)
   readonly property int cardRadius: notificationService ? notificationService.cornerRadius : Style.cornerRadius
 
+  readonly property string stateHome: Quickshell.env("XDG_STATE_HOME") || ((Quickshell.env("HOME") || "") + "/.local/state")
+  readonly property string glanceStateDir: stateHome + "/omarchy-glance"
+  readonly property string thumbsDir: glanceStateDir + "/thumbs"
   readonly property string historyDir: (Quickshell.env("HOME") || "") + "/.local/state/omarchy/notifications/history"
   readonly property string popupDir: (Quickshell.env("HOME") || "") + "/.local/state/omarchy/notifications"
   readonly property string imagesDir: (Quickshell.env("HOME") || "") + "/.local/state/omarchy/notifications/images"
@@ -32,6 +36,12 @@ Item {
   // Video path -> cached thumbnail file URL, filled in by glance-thumb.
   property var videoThumbs: ({})
   property var pendingThumbFiles: []
+  // Verified regular local files checked by historyLoader or glance-thumb.
+  property var verifiedFiles: ({})
+  // In-memory tombstone mirror so immediate reloads do not resurrect dismissed
+  // entries before glance-unread finishes writing tombstone.json.
+  property double localClearedBefore: 0
+  property var localDismissedKeys: ({})
 
   signal notificationActivated()
 
@@ -53,6 +63,21 @@ Item {
 
   property bool discardPendingResults: false
   property bool reloadPending: false
+  property int loadGeneration: 0
+  property int activeLoadGeneration: 0
+
+  function isTombstoned(key, stamp) {
+    if (!Safety.isValidKey(key)) return true
+    if (localDismissedKeys[key] === true) return true
+    if (localClearedBefore > 0 && Number(stamp || 0) <= localClearedBefore) return true
+    return false
+  }
+
+  function isAllowedThumbPath(path) {
+    var safe = Safety.localImagePath(path)
+    if (!safe || !Safety.isImageFile(safe)) return false
+    return safe.indexOf(root.thumbsDir + "/") === 0
+  }
 
   function refresh() {
     discardPendingResults = false
@@ -64,7 +89,7 @@ Item {
     Quickshell.execDetached(["bash", "-c",
       "unreadbin=\"$1\"; stamp=\"$2\"\n" +
       "[[ -x $unreadbin ]] && \"$unreadbin\" mark-seen \"$stamp\" >/dev/null 2>&1 || true",
-      "--", unreadBinPath, String(nowMs)])
+      "--", unreadBinPath, String(Math.floor(nowMs))])
     reload()
   }
 
@@ -73,78 +98,244 @@ Item {
       reloadPending = true
       return
     }
+    discardPendingResults = false
+    loadGeneration += 1
+    activeLoadGeneration = loadGeneration
     historyLoader.command = ["bash", "-c",
-      "popup=\"$1\"; hist=\"$2\"\n" +
+      "popup=\"$1\"; hist=\"$2\"; glance_state=\"$3\"\n" +
       "files=()\n" +
-      "[[ -f \"$popup/live.json\" && -s \"$popup/live.json\" ]] && files+=(\"$popup/live.json\")\n" +
-      "[[ -f \"$popup/history.json\" && -s \"$popup/history.json\" ]] && files+=(\"$popup/history.json\")\n" +
-      "while IFS= read -r f; do\n" +
-      "  [[ -n \"$f\" && -s \"$f\" ]] && files+=(\"$f\")\n" +
-      "done < <(find \"$popup\" \"$hist\" -maxdepth 1 -type f -name '*.json' ! -name 'live.json' ! -name 'history.json' ! -name 'quiet.json' 2>/dev/null)\n" +
-      "if (( ${#files[@]} > 0 )); then\n" +
-      "  jq -c -s '\n" +
-      "    def to_entries:\n" +
+      "if [[ -d \"$popup\" && ! -L \"$popup\" ]]; then\n" +
+      "  for fixed in \"$popup/live.json\" \"$popup/history.json\"; do\n" +
+      "    if [[ -f \"$fixed\" && ! -L \"$fixed\" && -s \"$fixed\" ]]; then\n" +
+      "      sz=$(stat -c %s -- \"$fixed\" 2>/dev/null || echo 0)\n" +
+      "      (( sz > 0 && sz <= 5242880 )) && files+=(\"$fixed\")\n" +
+      "    fi\n" +
+      "  done\n" +
+      "  while IFS= read -r f; do\n" +
+      "    [[ -n \"$f\" && ! -L \"$f\" && -s \"$f\" ]] || continue\n" +
+      "    sz=$(stat -c %s -- \"$f\" 2>/dev/null || echo 0)\n" +
+      "    (( sz > 0 && sz <= 5242880 )) && files+=(\"$f\")\n" +
+      "  done < <(find \"$popup\" -maxdepth 1 -type f -name '*.json' ! -name 'live.json' ! -name 'history.json' ! -name 'quiet.json' 2>/dev/null)\n" +
+      "fi\n" +
+      "if [[ -d \"$hist\" && ! -L \"$hist\" ]]; then\n" +
+      "  while IFS= read -r f; do\n" +
+      "    [[ -n \"$f\" && ! -L \"$f\" && -s \"$f\" ]] || continue\n" +
+      "    sz=$(stat -c %s -- \"$f\" 2>/dev/null || echo 0)\n" +
+      "    (( sz > 0 && sz <= 5242880 )) && files+=(\"$f\")\n" +
+      "  done < <(find \"$hist\" -maxdepth 1 -type f -name '*.json' ! -name 'live.json' ! -name 'history.json' ! -name 'quiet.json' 2>/dev/null)\n" +
+      "fi\n" +
+      "valid_files=()\n" +
+      "for f in \"${files[@]}\"; do\n" +
+      "  jq -e . \"$f\" >/dev/null 2>&1 && valid_files+=(\"$f\")\n" +
+      "done\n" +
+      "if (( ${#valid_files[@]} == 0 )); then\n" +
+      "  printf '{\"entries\":[],\"verifiedFiles\":[]}\\n'\n" +
+      "  exit 0\n" +
+      "fi\n" +
+      "tomb='{\"clearedBefore\":0,\"dismissedKeys\":[]}'\n" +
+      "if [[ -n \"$glance_state\" && -d \"$glance_state\" && ! -L \"$glance_state\" && -f \"$glance_state/tombstone.json\" && ! -L \"$glance_state/tombstone.json\" ]]; then\n" +
+      "  tsz=$(stat -c %s -- \"$glance_state/tombstone.json\" 2>/dev/null || echo 0)\n" +
+      "  if (( tsz > 0 && tsz <= 262144 )); then\n" +
+      "    tc=$(jq -c 'if type == \"object\" then {clearedBefore: ((.clearedBefore // 0) | if type == \"number\" and isfinite and . >= 0 then floor else 0 end), dismissedKeys: ((.dismissedKeys // []) | if type == \"array\" then map(select(type == \"string\" and test(\"^[A-Za-z0-9_-]{1,120}$\"))) | .[-500:] else [] end)} else {clearedBefore:0,dismissedKeys:[]} end' \"$glance_state/tombstone.json\" 2>/dev/null || true)\n" +
+      "    [[ -n \"$tc\" ]] && tomb=\"$tc\"\n" +
+      "  fi\n" +
+      "fi\n" +
+      "entries=$(jq -c -s --argjson tomb \"$tomb\" '\n" +
+      "  def to_entries:\n" +
+      "    if type == \"array\" then .[]\n" +
+      "    elif type == \"object\" then .\n" +
+      "    else empty\n" +
+      "    end;\n" +
+      "  def valid_key:\n" +
+      "    type == \"string\" and test(\"^[A-Za-z0-9_-]{1,120}$\");\n" +
+      "  ($tomb.clearedBefore // 0) as $cleared\n" +
+      "  | ($tomb.dismissedKeys // []) as $dismissed\n" +
+      "  | [\n" +
+      "      .[]?\n" +
+      "      | to_entries\n" +
+      "      | select(type == \"object\")\n" +
+      "      | select(.key or .id or .originalId or .ts or .timestamp)\n" +
+      "      | .timestamp = (\n" +
+      "          if (.timestamp | type) == \"number\" and (.timestamp | isfinite) then (.timestamp | floor)\n" +
+      "          elif (.ts | type) == \"number\" and (.ts | isfinite) then ((.ts * 1000) | floor)\n" +
+      "          else 0\n" +
+      "          end\n" +
+      "        )\n" +
+      "      | (if has(\"key\") and .key != null then .key\n" +
+      "         else \"\\(.timestamp)-\\(.originalId // .id // 0)\"\n" +
+      "         end) as $k\n" +
+      "      | select($k | valid_key)\n" +
+      "      | .key = $k\n" +
+      "      | select($cleared <= 0 or .timestamp > $cleared)\n" +
+      "      | select(($dismissed | index($k)) == null)\n" +
+      "    ]\n" +
+      "  | unique_by(.key)\n" +
+      "  | sort_by(.timestamp)\n" +
+      "  | reverse\n" +
+      "  | .[0:30]\n" +
+      "' \"${valid_files[@]}\" 2>/dev/null || echo '[]')\n" +
+      "urldecode() {\n" +
+      "  local s=\"$1\" out=\"\" hex byte val\n" +
+      "  while [[ $s =~ ^([^%]*)%([0-9A-Fa-f]{2})(.*)$ ]]; do\n" +
+      "    out+=\"${BASH_REMATCH[1]}\"\n" +
+      "    hex=\"${BASH_REMATCH[2]}\"\n" +
+      "    val=$((16#$hex))\n" +
+      "    if (( val < 32 || val == 127 || (val >= 128 && val <= 159) )); then return 1; fi\n" +
+      "    printf -v byte \"\\\\x$hex\"\n" +
+      "    out+=\"$byte\"\n" +
+      "    s=\"${BASH_REMATCH[3]}\"\n" +
+      "  done\n" +
+      "  [[ $s == *%* ]] && return 1\n" +
+      "  REPLY=\"$out$s\"\n" +
+      "}\n" +
+      "check_local_regular_file() {\n" +
+      "  local p=\"$1\"\n" +
+      "  p=\"${p#\"${p%%[![:space:]]*}\"}\"\n" +
+      "  p=\"${p%\"${p##*[![:space:]]}\"}\"\n" +
+      "  [[ -n \"$p\" && ${#p} -le 3072 ]] || return 1\n" +
+      "  [[ \"$p\" == image://icon/* ]] && p=\"${p#image://icon/}\"\n" +
+      "  if [[ \"${p,,}\" == file://* ]]; then\n" +
+      "    [[ \"${p,,}\" == file:///* && \"$p\" != *[?#]* ]] || return 1\n" +
+      "    urldecode \"${p:7}\" || return 1\n" +
+      "    p=\"$REPLY\"\n" +
+      "  fi\n" +
+      "  [[ -n \"$p\" && ${#p} -le 1024 && \"$p\" == /* && \"$p\" != *[[:cntrl:]]* ]] || return 1\n" +
+      "  [[ \"$p\" != *//* && \"$p\" != */ ]] || return 1\n" +
+      "  local segs seg\n" +
+      "  IFS=/ read -ra segs <<< \"${p:1}\"\n" +
+      "  for seg in \"${segs[@]}\"; do\n" +
+      "    [[ -n \"$seg\" && \"$seg\" != \".\" && \"$seg\" != \"..\" ]] || return 1\n" +
+      "  done\n" +
+      "  [[ ! \"$p\" =~ ^/(proc|sys|dev)(/|$) ]] || return 1\n" +
+      "  if [[ \"$p\" =~ ^/(var/)?run(/|$) ]] && [[ ! \"$p\" =~ ^/run/user/[0-9]+/. ]]; then return 1; fi\n" +
+      "  [[ -f \"$p\" && -r \"$p\" ]] || return 1\n" +
+      "  local rp\n" +
+      "  rp=$(realpath -e -- \"$p\" 2>/dev/null) || return 1\n" +
+      "  [[ -f \"$rp\" && -r \"$rp\" ]] || return 1\n" +
+      "  [[ ! \"$rp\" =~ ^/(proc|sys|dev)(/|$) ]] || return 1\n" +
+      "  if [[ \"$rp\" =~ ^/(var/)?run(/|$) ]] && [[ ! \"$rp\" =~ ^/run/user/[0-9]+/. ]]; then return 1; fi\n" +
+      "  REPLY=\"$p\"\n" +
+      "}\n" +
+      "verified=\"\"\n" +
+      "while IFS= read -r cand; do\n" +
+      "  [[ -n \"$cand\" ]] || continue\n" +
+      "  if check_local_regular_file \"$cand\"; then\n" +
+      "    verified+=\"$REPLY\"$'\\n'\n" +
+      "  fi\n" +
+      "done < <(\n" +
+      "  printf '%s\\n' \"$entries\" | jq -r '\n" +
+      "    def exec_items:\n" +
       "      if type == \"array\" then .[]\n" +
-      "      elif type == \"object\" then .\n" +
+      "      elif type == \"string\" then\n" +
+      "        (if startswith(\"[\") then (fromjson? // [.]) else [.] end)\n" +
+      "        | if type == \"array\" then .[] else empty end\n" +
       "      else empty\n" +
       "      end;\n" +
-      "    [ .[]? | to_entries | select(.key or .id or .originalId or .ts or .timestamp) | .timestamp = (if .timestamp then .timestamp elif .ts then (.ts * 1000 | floor) else 0 end) ]\n" +
-      "    | unique_by(.key // (.timestamp|tostring))\n" +
-      "    | sort_by(.timestamp)\n" +
-      "    | reverse\n" +
-      "    | .[0:30]\n" +
-      "    | .[]\n" +
-      "  ' \"${files[@]}\" 2>/dev/null\n" +
-      "fi",
-      "--", popupDir, historyDir]
+      "    .[]\n" +
+      "    | (\n" +
+      "        (.image // empty | strings),\n" +
+      "        (.preview // empty | strings),\n" +
+      "        (.file // empty | strings),\n" +
+      "        (((.execArgv | exec_items), (.exec // empty | strings)) | strings |\n" +
+      "          .,\n" +
+      "          (\n" +
+      "            gsub(\"(?i)https?://[^\\\\s\\\"'\\''\\\\r\\\\n]+\"; \" \")\n" +
+      "            | (\n" +
+      "                (scan(\"(?:^|\\\\s|--[a-z0-9_-]+=)([\\\"'\\''])((?i:file:///)(?!/)|/(?!/))([^\\\"'\\''\\\\r\\\\n]+?\\\\.(?i:jpe?g|png|webp|gif|mp4|mkv|webm|mov|avi))\\\\1(?=$|[\\\\s;])\") | .[1] + .[2]),\n" +
+      "                (scan(\"(?:^|[\\\\s=])(((?i:file:///)(?!/)|/(?!/))[^\\\\s\\\"'\\''\\\\r\\\\n]+?\\\\.(?i:jpe?g|png|webp|gif|mp4|mkv|webm|mov|avi))(?=$|[\\\\s;])\") | .[0])\n" +
+      "              )\n" +
+      "          )\n" +
+      "        )\n" +
+      "      )\n" +
+      "    | select(test(\"[\\r\\n]\") | not)\n" +
+      "  ' 2>/dev/null | awk '!seen[$0]++'\n" +
+      ")\n" +
+      "jq -cn --argjson entries \"$entries\" --arg v \"$verified\" \\\n" +
+      "  '{entries: $entries, verifiedFiles: ($v | split(\"\\n\") | map(select(length > 0)) | unique)}'",
+      "--", popupDir, historyDir, glanceStateDir]
     historyLoader.running = true
   }
 
   function replaceHistory(raw) {
-    if (discardPendingResults) return
+    if (discardPendingResults || activeLoadGeneration !== loadGeneration) return
     historyModel.clear()
-    var lines = String(raw || "").split("\n")
+    var entries = []
+    var verifiedMap = ({})
+    var trimmed = String(raw || "").trim()
+    if (trimmed) {
+      try {
+        var payload = JSON.parse(trimmed)
+        if (payload && typeof payload === "object" && !Array.isArray(payload) && Array.isArray(payload.entries)) {
+          entries = payload.entries
+          if (Array.isArray(payload.verifiedFiles)) {
+            for (var v = 0; v < payload.verifiedFiles.length; v++) {
+              var vp = Safety.localImagePath(payload.verifiedFiles[v])
+              if (vp) verifiedMap[vp] = true
+            }
+          }
+        }
+      } catch (parseErr) {
+        console.warn("clock notifications: invalid history loader payload:", parseErr)
+      }
+    }
+    root.verifiedFiles = verifiedMap
+
     var seenKeys = ({})
     var videoFiles = []
-    for (var i = 0; i < lines.length && historyModel.count < 30; i++) {
-      var line = lines[i].trim()
-      if (!line) continue
+    for (var i = 0; i < entries.length && historyModel.count < Safety.MAX_HISTORY_ENTRIES; i++) {
       try {
-        var entry = JSON.parse(line)
+        var entry = entries[i]
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue
         var origId = Number(entry.originalId || entry.id || 0)
+        if (!isFinite(origId) || origId < 0) origId = 0
         var stamp = Number(entry.timestamp || (entry.ts ? entry.ts * 1000 : 0) || 0)
-        if (!stamp && entry.key) {
-          stamp = Number(String(entry.key).split("-")[0] || 0)
+        if (!isFinite(stamp) || stamp < 0) stamp = 0
+        if (!stamp && typeof entry.key === "string") {
+          var keyStamp = Number(entry.key.split("-")[0] || 0)
+          if (isFinite(keyStamp) && keyStamp > 0) stamp = keyStamp
         }
-        var key = String(entry.key || (stamp + "-" + origId))
+        var key = Safety.resolveEntryKey(entry, stamp, origId)
+        if (!key) continue
+        if (root.isTombstoned(key, stamp)) continue
         if (seenKeys[key]) continue
         seenKeys[key] = true
 
-        var fileSrc = root.extractMediaFilePath(entry.file || entry.execArgv || entry.exec)
-        var previewSrc = entry.preview || ""
+        var fileSrc = Safety.extractMediaFilePath(entry.file || entry.execArgv || entry.exec)
+        if (fileSrc && verifiedMap[fileSrc] !== true) fileSrc = ""
+
+        var previewSrc = Safety.verifiedLocalImageUrl(entry.preview, verifiedMap)
         if (!previewSrc && fileSrc) {
-          if (!root.isVideoFile(fileSrc)) previewSrc = Util.fileUrl(fileSrc)
-          else if (root.videoThumbs[fileSrc]) previewSrc = root.videoThumbs[fileSrc]
-          else if (videoFiles.indexOf(fileSrc) === -1) videoFiles.push(fileSrc)
+          if (!Safety.isVideoFile(fileSrc)) {
+            previewSrc = Safety.verifiedLocalImageUrl(fileSrc, verifiedMap)
+          } else if (root.videoThumbs[fileSrc]) {
+            var thumbPath = Safety.localImagePath(root.videoThumbs[fileSrc])
+            if (thumbPath && root.isAllowedThumbPath(thumbPath)) {
+              verifiedMap[thumbPath] = true
+              previewSrc = Safety.localImageUrl(thumbPath)
+            }
+          } else if (videoFiles.indexOf(fileSrc) === -1) {
+            videoFiles.push(fileSrc)
+          }
         }
 
-        var argvStr = ""
-        if (entry.execArgv) {
-          argvStr = typeof entry.execArgv === "string" ? entry.execArgv : JSON.stringify(entry.execArgv)
-        }
+        var safeImageUrl = Safety.verifiedLocalImageUrl(entry.image, verifiedMap)
+        var parsedArgv = Safety.parseExecArgv(entry.execArgv)
+        var argvStr = parsedArgv
+          ? JSON.stringify(parsedArgv)
+          : (typeof entry.execArgv === "string" ? Safety.bounded(entry.execArgv, Safety.MAX_BODY) : "")
 
         historyModel.append({
           key: key,
           id: origId,
           originalId: origId,
-          app: String(entry.app || ""),
-          appIcon: String(entry.appIcon || ""),
-          summary: String(entry.summary || ""),
-          body: String(entry.body || ""),
-          image: String(entry.image || ""),
-          preview: String(previewSrc || ""),
-          file: String(fileSrc || ""),
-          glyph: String(entry.glyph || ""),
+          app: Safety.bounded(String(entry.app || ""), Safety.MAX_APP_NAME),
+          appIcon: Safety.bounded(String(entry.appIcon || ""), Safety.MAX_APP_NAME),
+          summary: Safety.bounded(String(entry.summary || ""), Safety.MAX_SUMMARY),
+          body: Safety.bounded(String(entry.body || ""), Safety.MAX_BODY),
+          image: safeImageUrl,
+          preview: previewSrc,
+          file: fileSrc,
+          glyph: Safety.safeGlyph(entry.glyph),
           exec: "",
           execArgv: argvStr,
           urgency: Number(entry.urgency || 1),
@@ -155,76 +346,107 @@ Item {
         console.warn("clock notifications: invalid history entry:", error)
       }
     }
+    root.verifiedFiles = verifiedMap
     root.clampCursor()
     root.requestThumbs(videoFiles)
   }
 
   function dismissAll() {
+    loadGeneration += 1
     discardPendingResults = true
     reloadPending = false
-    localState.lastSeen = Date.now()
 
-    if (notificationService && typeof notificationService.clearHistory === "function") {
-      notificationService.clearHistory()
+    var clearedAt = Math.floor(Date.now())
+    localClearedBefore = Math.max(localClearedBefore, clearedAt)
+    localDismissedKeys = ({})
+    readMark = Math.max(readMark, clearedAt)
+    localState.lastSeen = clearedAt
+
+    var dropKeys = ({})
+    for (var i = 0; i < historyModel.count; i++) {
+      var mk = String(historyModel.get(i).key || "")
+      if (mk) dropKeys[mk] = true
     }
+
+    if (notificationService) {
+      if (Array.isArray(notificationService.liveEntries)) {
+        for (var l = 0; l < notificationService.liveEntries.length; l++) {
+          var lk = notificationService.liveEntries[l] && String(notificationService.liveEntries[l].key || "")
+          if (lk) dropKeys[lk] = true
+        }
+      }
+      if (Array.isArray(notificationService.historyEntries)) {
+        for (var h = 0; h < notificationService.historyEntries.length; h++) {
+          var hk = notificationService.historyEntries[h] && String(notificationService.historyEntries[h].key || "")
+          if (hk) dropKeys[hk] = true
+        }
+      }
+
+      if (typeof notificationService.clearAll === "function") {
+        notificationService.clearAll("dismissed", true)
+      }
+
+      var pruneService = function() {
+        if (!notificationService) return
+        if (Array.isArray(notificationService.historyEntries)) {
+          var keptHist = notificationService.historyEntries.filter(function(e) {
+            if (!e) return false
+            var k = String(e.key || "")
+            if (k && dropKeys[k]) return false
+            var tsMs = Number(e.ts || 0) * 1000
+            return isFinite(tsMs) && tsMs > clearedAt
+          })
+          if (keptHist.length !== notificationService.historyEntries.length) {
+            notificationService.historyEntries = keptHist
+            if (typeof notificationService.saveSoon === "function") {
+              notificationService.saveSoon("history")
+            }
+          }
+        }
+        if (Array.isArray(notificationService.liveEntries)) {
+          var keptLive = notificationService.liveEntries.filter(function(e) {
+            if (!e) return false
+            var k = String(e.key || "")
+            if (k && dropKeys[k]) return false
+            var tsMs = Number(e.ts || 0) * 1000
+            return isFinite(tsMs) && tsMs > clearedAt
+          })
+          if (keptLive.length !== notificationService.liveEntries.length) {
+            notificationService.liveEntries = keptLive
+            if (typeof notificationService.saveSoon === "function") {
+              notificationService.saveSoon("live")
+            }
+          }
+        }
+      }
+
+      pruneService()
+      Qt.callLater(pruneService)
+    }
+
     Quickshell.execDetached(["bash", "-c",
-      "popup=\"$1\"; hist=\"$2\"; unreadbin=\"$3\"\n" +
-      "omarchy-shell -q notifications clear >/dev/null 2>&1 || true\n" +
-      "[[ -x $unreadbin ]] && \"$unreadbin\" mark-seen >/dev/null 2>&1 || true\n" +
-      "rm -f -- \"$hist\"/*.json 2>/dev/null || true\n" +
-      "find \"$popup\" -maxdepth 1 -type f -name '*.json' ! -name 'live.json' ! -name 'history.json' ! -name 'quiet.json' -delete 2>/dev/null || true\n" +
-      "echo '[]' > \"$popup/history.json\" 2>/dev/null || true\n" +
-      "echo '[]' > \"$popup/live.json\" 2>/dev/null || true",
-      "--", popupDir, historyDir, unreadBinPath])
+      "unreadbin=\"$1\"; stamp=\"$2\"\n" +
+      "[[ -x $unreadbin ]] && \"$unreadbin\" clear-all \"$stamp\" >/dev/null 2>&1 || true",
+      "--", unreadBinPath, String(clearedAt)])
 
     historyModel.clear()
     root.deactivateCursor()
   }
 
   function isFocusableApp(app) {
-    var name = String(app || "")
-    return name !== "" && name !== "notify-send" && name !== "omarchy-action"
+    return Safety.isFocusableApp(app)
   }
 
   function isVideoFile(path) {
-    return /\.(?:mp4|mkv|webm|mov|avi)$/i.test(String(path || ""))
+    return Safety.isVideoFile(path)
   }
 
   function isImageFile(path) {
-    return /\.(?:jpe?g|png|webp|gif)$/i.test(String(path || ""))
+    return Safety.isImageFile(path)
   }
 
   function extractMediaFilePath(value) {
-    if (!value) return ""
-    var items = []
-    if (Array.isArray(value)) {
-      items = value
-    } else {
-      var str = String(value).trim()
-      if (!str) return ""
-      if (str.charAt(0) === "[") {
-        try {
-          var parsed = JSON.parse(str)
-          if (Array.isArray(parsed)) items = parsed
-        } catch (_) {}
-      }
-      if (items.length === 0) {
-        items = [str]
-      }
-    }
-
-    var mediaRegex = /(?:file:\/\/)?(\/[^"'\r\n\0]+\.(?:jpe?g|png|webp|gif|mp4|mkv|webm|mov|avi))(?=$|["'\s])/i
-    for (var i = 0; i < items.length; i++) {
-      var itemStr = String(items[i] || "").trim()
-      if (!itemStr) continue
-      var clean = itemStr.replace(/^file:\/\//, "")
-      if (/^\/[^"'\r\n\0]+\.(?:jpe?g|png|webp|gif|mp4|mkv|webm|mov|avi)$/i.test(clean)) {
-        return clean
-      }
-      var m = mediaRegex.exec(itemStr)
-      if (m && m[1]) return m[1].replace(/^file:\/\//, "")
-    }
-    return ""
+    return Safety.extractMediaFilePath(value)
   }
 
   function appInitial(appName) {
@@ -242,43 +464,62 @@ Item {
     if (!entry) return
 
     var key = String(entry.key || "")
-    var origId = String(entry.originalId || entry.id || "")
-    var stamp = String(entry.timestamp || "")
+    if (!Safety.isValidKey(key)) {
+      historyModel.remove(index)
+      root.clampCursor()
+      return
+    }
+
+    localDismissedKeys[key] = true
+
+    if (notificationService) {
+      if (typeof notificationService.closeToast === "function") {
+        notificationService.closeToast(key, "dismissed", true)
+      } else if (typeof notificationService.closeToasts === "function") {
+        notificationService.closeToasts([key], "dismissed", true)
+      }
+
+      var removeKeyFromService = function() {
+        if (!notificationService) return
+        if (Array.isArray(notificationService.historyEntries)) {
+          var nextHist = notificationService.historyEntries.filter(function(e) {
+            return e && String(e.key || "") !== key
+          })
+          if (nextHist.length !== notificationService.historyEntries.length) {
+            notificationService.historyEntries = nextHist
+            if (typeof notificationService.saveSoon === "function") {
+              notificationService.saveSoon("history")
+            }
+          }
+        }
+        if (Array.isArray(notificationService.liveEntries)) {
+          var nextLive = notificationService.liveEntries.filter(function(e) {
+            return e && String(e.key || "") !== key
+          })
+          if (nextLive.length !== notificationService.liveEntries.length) {
+            notificationService.liveEntries = nextLive
+            if (typeof notificationService.saveSoon === "function") {
+              notificationService.saveSoon("live")
+            }
+          }
+        }
+      }
+
+      removeKeyFromService()
+      Qt.callLater(removeKeyFromService)
+    }
 
     Quickshell.execDetached(["bash", "-c",
-      "popup=\"$1\"; hist=\"$2\"; key=\"$3\"; stem=\"$4\"\n" +
-      "for file in \"$popup/history.json\" \"$popup/live.json\"; do\n" +
-      "  if [[ -f \"$file\" ]]; then\n" +
-      "    tmp=$(mktemp \"${file}.XXXXXX\")\n" +
-      "    if jq --arg k \"$key\" 'if type == \"array\" then map(select(.key != $k)) else . end' \"$file\" > \"$tmp\" 2>/dev/null; then\n" +
-      "      mv -f \"$tmp\" \"$file\"\n" +
-      "    else\n" +
-      "      rm -f \"$tmp\"\n" +
-      "    fi\n" +
-      "  fi\n" +
-      "done\n" +
-      "rm -f -- \"$popup/$stem.json\" \"$hist/$stem.json\" \"$popup/$key.json\" \"$hist/$key.json\" 2>/dev/null || true",
-      "--", popupDir, historyDir, key, stamp + "-" + origId])
+      "unreadbin=\"$1\"; key=\"$2\"\n" +
+      "[[ -x $unreadbin ]] && \"$unreadbin\" dismiss-key \"$key\" >/dev/null 2>&1 || true",
+      "--", unreadBinPath, key])
 
     historyModel.remove(index)
     root.clampCursor()
   }
 
   function parseExecArgv(value) {
-    if (!value) return null
-    var parsed = null
-    if (Array.isArray(value)) parsed = value
-    else {
-      var text = String(value).trim()
-      if (!text || text.charAt(0) !== "[") return null
-      try { parsed = JSON.parse(text) } catch (_) { return null }
-    }
-    if (!Array.isArray(parsed) || parsed.length === 0) return null
-    for (var i = 0; i < parsed.length; i++) {
-      if (typeof parsed[i] !== "string" || parsed[i].indexOf("\u0000") >= 0) return null
-    }
-    if (!parsed[0] || parsed[0].charAt(0) === "-") return null
-    return parsed
+    return Safety.parseExecArgv(value)
   }
 
   function openNotification(index) {
@@ -286,21 +527,8 @@ Item {
     var entry = historyModel.get(index)
     if (!entry) return
 
-    var filePath = String(entry.file || "")
-    if (filePath === "") {
-      filePath = extractMediaFilePath(entry.file || entry.execArgv || entry.exec || entry.image)
-    }
-
-    // 1. If a media file (image, screenshot, or video recording) is resolved, open directly via xdg-open without a shell
-    if (filePath !== "") {
-      Quickshell.execDetached(["xdg-open", filePath])
-      dismissHistoryEntry(index)
-      notificationActivated()
-      return
-    }
-
-    // 2. If an execArgv command is available, execute it safely
-    var argv = root.parseExecArgv(entry.execArgv)
+    // 1. If an execArgv command is available, execute it safely first
+    var argv = Safety.parseExecArgv(entry.execArgv)
     if (argv) {
       Util.execArgv(argv)
       dismissHistoryEntry(index)
@@ -308,8 +536,20 @@ Item {
       return
     }
 
+    // 2. Fallback: if a validated local media file is resolved, open via xdg-open --
+    var filePath = Safety.localImagePath(entry.file)
+    if (!filePath) {
+      filePath = Safety.extractMediaFilePath(entry.execArgv || entry.exec)
+    }
+    if (filePath !== "" && root.verifiedFiles[filePath] === true) {
+      Quickshell.execDetached(["xdg-open", "--", filePath])
+      dismissHistoryEntry(index)
+      notificationActivated()
+      return
+    }
+
     // 3. Otherwise focus or launch the application safely
-    if (isFocusableApp(entry.app)) {
+    if (Safety.isFocusableApp(entry.app)) {
       launchApp(entry.app)
       dismissHistoryEntry(index)
       notificationActivated()
@@ -324,28 +564,75 @@ Item {
 
   function launchApp(appName) {
     if (launchProc.running) return
-    launchProc.command = ["bash", "-c", root.launchOrFocusScript, "--", String(appName || "")]
+    var name = String(appName || "").trim()
+    if (!Safety.isFocusableApp(name)) return
+    launchProc.command = ["bash", "-c", root.launchOrFocusScript, "--", name]
     launchProc.running = true
   }
 
   readonly property string launchOrFocusScript:
     "app=$1\n" +
+    "if [[ -z $app || ${#app} -gt 256 || $app == *[[:cntrl:]]* ]]; then\n" +
+    "  exit 0\n" +
+    "fi\n" +
     "desktop=\n" +
+    "app_lower=${app,,}\n" +
+    "shopt -s nullglob\n" +
     "for dir in \"$HOME/.local/share/applications\" \"$HOME/.nix-profile/share/applications\" \"/usr/local/share/applications\" \"/usr/share/applications\"; do\n" +
-    "  for file in \"$dir\"/*.desktop; do\n" +
+    "  [[ -d $dir ]] || continue\n" +
+    "  files=(\"$dir\"/*.desktop)\n" +
+    "  (( ${#files[@]} > 0 )) || continue\n" +
+    "  for file in \"${files[@]}\"; do\n" +
     "    [[ -f $file ]] || continue\n" +
-    "    if [[ $(basename \"$file\" .desktop) == \"$app\" ]] || grep -m1 -qi \"^Name=$app$\" \"$file\"; then desktop=\"$file\"; break 2; fi\n" +
+    "    base=$(basename \"$file\" .desktop)\n" +
+    "    if [[ $base == \"$app\" || ${base,,} == \"$app_lower\" ]]; then desktop=\"$file\"; break 2; fi\n" +
     "  done\n" +
+    "  desktop=$(TARGET_APP=\"$app\" awk '\n" +
+    "    BEGIN { target = tolower(ENVIRON[\"TARGET_APP\"]); in_entry = 0 }\n" +
+    "    FNR == 1 { in_entry = 0 }\n" +
+    "    /^\\[/ {\n" +
+    "      if ($0 == \"[Desktop Entry]\") { in_entry = 1 }\n" +
+    "      else { in_entry = 0 }\n" +
+    "      next\n" +
+    "    }\n" +
+    "    in_entry && /^Name=/ {\n" +
+    "      val = substr($0, 6)\n" +
+    "      sub(/\\r$/, \"\", val)\n" +
+    "      if (tolower(val) == target) { print FILENAME; exit 0 }\n" +
+    "    }\n" +
+    "  ' \"${files[@]}\" 2>/dev/null)\n" +
+    "  [[ -n $desktop ]] && break\n" +
     "done\n" +
     "if [[ -z $desktop ]]; then\n" +
-    "  omarchy-hyprland-focus-app \"$app\"\n" +
+    "  escaped_app=$(printf '%s' \"$app\" | sed 's/[][(){}.+*?^$|\\\\]/\\\\&/g')\n" +
+    "  omarchy-hyprland-focus-app \"$escaped_app\"\n" +
     "  exit 0\n" +
     "fi\n" +
     "id=$(basename \"$desktop\" .desktop)\n" +
-    "wmclass=$(sed -n 's/^StartupWMClass=//p' \"$desktop\" | head -n1)\n" +
-    "pattern=$(printf '%s|%s|%s' \"$id\" \"$wmclass\" \"$app\")\n" +
-    "address=$(hyprctl clients -j 2>/dev/null | jq -r --arg p \"$pattern\" 'first(.[] | select((.class // \"\") | test($p; \"i\"))).address // empty')\n" +
-    "if [[ -n $address ]]; then\n" +
+    "wmclass=$(awk '\n" +
+    "  BEGIN { in_entry = 0 }\n" +
+    "  /^\\[/ {\n" +
+    "    if ($0 == \"[Desktop Entry]\") { in_entry = 1 }\n" +
+    "    else if (in_entry) { exit 0 }\n" +
+    "    next\n" +
+    "  }\n" +
+    "  in_entry && /^StartupWMClass=/ {\n" +
+    "    val = substr($0, 16)\n" +
+    "    sub(/\\r$/, \"\", val)\n" +
+    "    if (val != \"\") { print val; exit 0 }\n" +
+    "  }\n" +
+    "' \"$desktop\" 2>/dev/null)\n" +
+    "address=$(hyprctl clients -j 2>/dev/null | jq -r --arg id \"$id\" --arg wmclass \"$wmclass\" --arg app \"$app\" '\n" +
+    "  ([$id, $wmclass, $app] | map(select(type == \"string\" and length > 0) | ascii_downcase)) as $needles\n" +
+    "  | first(\n" +
+    "      .[]\n" +
+    "      | select(\n" +
+    "          ((.class // \"\") | ascii_downcase) as $cls\n" +
+    "          | ($cls | length) > 0 and any($needles[]; . as $n | $cls | contains($n))\n" +
+    "        )\n" +
+    "    ).address // empty\n" +
+    "')\n" +
+    "if [[ $address =~ ^0x[0-9a-fA-F]+$ ]]; then\n" +
     "  hyprctl dispatch \"hl.dsp.focus({ window = \\\"address:$address\\\" })\" >/dev/null 2>&1 || \\\n" +
     "    hyprctl dispatch focuswindow \"address:$address\" >/dev/null\n" +
     "else\n" +
@@ -431,51 +718,67 @@ Item {
 
   function resolveEntryIcon(iconName) {
     var value = String(iconName || "").trim()
-    if (!value) return ""
-    if (value.indexOf("file://") === 0 || value.indexOf("image://") === 0) return value
-    if (value.charAt(0) === "/") return Util.fileUrl(value)
+    if (!Safety.isValidIconName(value)) return ""
     return Quickshell.iconPath(value, true)
+  }
+
+  function resolveDesktopIcon(deIcon) {
+    var value = String(deIcon || "").trim()
+    if (!value) return ""
+    if (Safety.isValidIconName(value)) return Quickshell.iconPath(value, true)
+    if (value.charAt(0) === "/") return Safety.localImageUrl(value)
+    return ""
   }
 
   function resolveNotificationIcon(image, appIcon, app) {
     var dummy = root._appsRevision
 
-    // 1. Direct image from notification
+    // 1. Direct image from notification (Security.js localImagePath rules + verified regular file)
     var img = String(image || "").trim()
     if (img !== "") {
-      var imgPath = resolveEntryIcon(img)
-      if (imgPath) return imgPath
+      var imgUrl = Safety.verifiedLocalImageUrl(img, root.verifiedFiles)
+      if (imgUrl) return imgUrl
     }
 
-    // 2. Explicit appIcon (e.g. "zen-browser")
+    // 2. Explicit appIcon (theme icon name only; never a path; + DesktopEntries lookup)
     var icon = String(appIcon || "").trim()
-    if (icon !== "") {
-      var iconPath = resolveEntryIcon(icon)
-      if (iconPath) return iconPath
-      try {
-        var entryFromIcon = DesktopEntries.heuristicLookup(icon)
-        if (entryFromIcon && entryFromIcon.icon) {
-          var p = resolveEntryIcon(entryFromIcon.icon)
-          if (p) return p
-        }
-      } catch (_) {}
+    if (Safety.isSafeLookupName(icon)) {
+      var iconCandidates = Safety.themedIconCandidates(icon)
+      for (var i = 0; i < iconCandidates.length; i++) {
+        var iconPath = Quickshell.iconPath(iconCandidates[i], true)
+        if (iconPath) return iconPath
+      }
+      var iconEntries = Safety.desktopLookupCandidates(icon, false)
+      for (var j = 0; j < iconEntries.length; j++) {
+        try {
+          var entryFromIcon = DesktopEntries.heuristicLookup(iconEntries[j])
+          if (entryFromIcon && entryFromIcon.icon) {
+            var p = resolveDesktopIcon(entryFromIcon.icon)
+            if (p) return p
+          }
+        } catch (_) {}
+      }
     }
 
-    // 3. Application name lookup (e.g. "ZapZap", "Zen", "Spotify")
+    // 3. Application name lookup (e.g. "ZapZap", "Zen", "Spotify"); never treat app as a path
     var appName = String(app || "").trim()
-    if (appName !== "" && appName !== "notify-send" && appName !== "omarchy-action" && appName !== "System") {
-      var direct = resolveEntryIcon(appName) || resolveEntryIcon(appName.toLowerCase())
-      if (direct) return direct
+    if (Safety.isFocusableApp(appName) && appName !== "System" && Safety.isSafeLookupName(appName)) {
+      var appIconCandidates = Safety.themedIconCandidates(appName)
+      for (var k = 0; k < appIconCandidates.length; k++) {
+        var direct = Quickshell.iconPath(appIconCandidates[k], true)
+        if (direct) return direct
+      }
 
-      try {
-        var de = DesktopEntries.heuristicLookup(appName)
-          || DesktopEntries.heuristicLookup(appName.toLowerCase())
-          || DesktopEntries.heuristicLookup(appName.toLowerCase().replace(/[^a-z0-9]+/g, ""))
-        if (de && de.icon) {
-          var dePath = resolveEntryIcon(de.icon)
-          if (dePath) return dePath
-        }
-      } catch (_) {}
+      var appEntries = Safety.desktopLookupCandidates(appName, true)
+      for (var m = 0; m < appEntries.length; m++) {
+        try {
+          var de = DesktopEntries.heuristicLookup(appEntries[m])
+          if (de && de.icon) {
+            var dePath = resolveDesktopIcon(de.icon)
+            if (dePath) return dePath
+          }
+        } catch (_) {}
+      }
     }
 
     return ""
@@ -486,11 +789,7 @@ Item {
   }
 
   function readableBody(value) {
-    return String(value || "")
-      .replace(/<img[^>]*>/gi, "")
-      .replace(/<br\s*\/?\s*>/gi, "\n")
-      .replace(/<[^>]+>/g, "")
-      .trim()
+    return Safety.readableBody(value)
   }
 
   function dayOf(timestamp) {
@@ -533,7 +832,7 @@ Item {
     id: historyLoader
     running: false
     onExited: {
-      if (!root.reloadPending || root.discardPendingResults) return
+      if (!root.reloadPending) return
       root.reloadPending = false
       Qt.callLater(root.reload)
     }
@@ -556,20 +855,23 @@ Item {
   function applyThumbs(raw) {
     var lines = String(raw || "").split("\n")
     var next = Object.assign({}, root.videoThumbs)
+    var nextVerified = Object.assign({}, root.verifiedFiles)
     var changed = false
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i].trim()
       if (!line) continue
       try {
         var item = JSON.parse(line)
-        var file = String(item.file || "")
-        var thumb = String(item.thumb || "")
-        if (!file || !thumb || thumb.charAt(0) !== "/") continue
-        next[file] = Util.fileUrl(thumb)
+        var file = Safety.localImagePath(item.file)
+        var thumb = Safety.localImagePath(item.thumb)
+        if (!file || !Safety.isVideoFile(file) || !root.isAllowedThumbPath(thumb)) continue
+        nextVerified[thumb] = true
+        next[file] = Safety.localImageUrl(thumb)
         changed = true
       } catch (error) {}
     }
     if (!changed) return
+    root.verifiedFiles = nextVerified
     root.videoThumbs = next
     for (var j = 0; j < historyModel.count; j++) {
       var row = historyModel.get(j)
@@ -593,7 +895,7 @@ Item {
     }
   }
 
-  Component.onCompleted: refresh()
+  Component.onCompleted: reload()
 
   ColumnLayout {
     anchors.fill: parent
@@ -604,6 +906,7 @@ Item {
       spacing: Style.space(8)
 
       Text {
+        textFormat: Text.PlainText
         Layout.fillWidth: true
         text: strings.t("notifications.title")
         color: root.foreground
@@ -623,6 +926,7 @@ Item {
 
         Text {
           id: dismissLabel
+          textFormat: Text.PlainText
           anchors.centerIn: parent
           text: strings.t("notifications.dismissAll")
           color: root.foreground
@@ -673,6 +977,7 @@ Item {
 
         Text {
           id: dayLabel
+          textFormat: Text.PlainText
           anchors.left: parent.left
           anchors.leftMargin: Style.space(2)
           anchors.bottom: parent.bottom
@@ -717,11 +1022,7 @@ Item {
         }
         readonly property bool unread: card.timestamp > root.readMark
 
-        readonly property string previewSource: {
-          if (card.preview !== "") return card.preview
-          if (card.file !== "" && !root.isVideoFile(card.file)) return Util.fileUrl(card.file)
-          return ""
-        }
+        readonly property string previewSource: Safety.resolvePreviewSource(card.preview, card.file, root.verifiedFiles)
         readonly property bool hasPreview: previewSource !== "" && previewImg.status === Image.Ready
 
         width: notificationList.width - notificationList.lane
@@ -990,6 +1291,7 @@ Item {
         spacing: Style.space(6)
 
         Text {
+          textFormat: Text.PlainText
           Layout.alignment: Qt.AlignHCenter
           text: "󰂚"
           color: root.borderColor
@@ -998,6 +1300,7 @@ Item {
         }
 
         Text {
+          textFormat: Text.PlainText
           Layout.alignment: Qt.AlignHCenter
           text: strings.t("notifications.empty")
           color: root.dimForeground

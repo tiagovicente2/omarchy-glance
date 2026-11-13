@@ -10,16 +10,26 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import tomllib
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
+from time import monotonic, sleep
 from typing import Any, Iterable
-from urllib.parse import urlsplit
 
 CONTRACT_VERSION = 1
+
+# Exit codes, shared with Panel.qml. Python and argparse exit 1 and 2 on their
+# own, so the outcomes the panel acts on use codes they never produce.
+EXIT_OK = 0
+EXIT_FAILED = 1
+EXIT_CALDIR_MISSING = 3
+EXIT_PULL_FAILED = 10
+EXIT_BUSY = 75
+DEFAULT_PULL_INTERVAL_SECONDS = 300
 DEFAULT_OUTPUT = Path("~/.local/state/omarchy/calendar-events.json").expanduser()
 DEFAULT_PAST_DAYS = 7
 DEFAULT_FUTURE_DAYS = 60
@@ -29,12 +39,33 @@ DEFAULT_COLOR_PALETTE = (
 )
 URL_RE = re.compile(r"https://[^\s<>\"']+", re.IGNORECASE)
 HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+# A subscribed feed (caldir's webcal provider) controls every field, and the
+# shell parses the result on its GUI thread, so everything written is bounded.
+MAX_TITLE_CHARS = 512
+MAX_LOCATION_CHARS = 512
+MAX_CALENDAR_NAME_CHARS = 128
+MAX_ID_CHARS = 512
+MAX_EVENTS = 5000
+MAX_DOCUMENT_BYTES = 8 * 1024 * 1024
 MEETING_HOSTS = (
     "meet.google.com",
     "teams.microsoft.com",
+    "teams.live.com",
     "zoom.us",
     "zoomgov.com",
 )
+# The meeting-link grammar mirrors Model.safeUrl and stock Omarchy's
+# notifications/Security.js (safeHttpUrl, canonicalHostname): a deliberately
+# narrow ASCII spelling that every URL parser reads the same way, rather than
+# whatever urlsplit or a browser happens to tolerate.
+MAX_URL = 4096
+MAX_HOSTNAME = 253
+URL_FORBIDDEN_RE = re.compile(r"[^\x21-\x7e]|[\\<>\"']")
+URL_BAD_ESCAPE_RE = re.compile(r"%(?:0[0-9a-f]|1[0-9a-f]|7f|25|5c)|%(?![0-9a-f]{2})", re.IGNORECASE)
+URL_PARTS_RE = re.compile(r"(https)://([^/?#]+)(.*)", re.IGNORECASE | re.DOTALL)
+AUTHORITY_RE = re.compile(r"([^:%@]+)(?::([0-9]{1,5}))?")
+HOSTNAME_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+")
+NUMERIC_LABEL_RE = re.compile(r"(?:0x[0-9a-f]*|[0-9]+)", re.IGNORECASE)
 ICS_MEETING_PROPERTIES = {
     "URL",
     "CONFERENCE",
@@ -64,6 +95,17 @@ PROVIDER_DIRS = (
     Path("/usr/lib/renCal/providers"),
 )
 PULL_TIMEOUT_SECONDS = 120
+EVENTS_TIMEOUT_SECONDS = 60
+KILL_GRACE_SECONDS = 2.0
+MAX_ERROR_CHARS = 200
+
+
+class CaldirMissing(Exception):
+    """The caldir binary could not be found (exit code 3)."""
+
+
+class CaldirFailed(ValueError):
+    """caldir ran and failed; the message is caldir's own error line."""
 
 
 def provider_environment() -> dict[str, str]:
@@ -74,30 +116,137 @@ def provider_environment() -> dict[str, str]:
     return env
 
 
+def caldir_error_line(stderr: str, stdout: str, returncode: int) -> str:
+    """caldir's own message, never a Python repr of the command.
+
+    caldir prints "Error: <what>" and then hints or a cause chain, so its first
+    "Error:" line says the most. Anything else falls back to the last line.
+    """
+    lines = [line.strip() for line in (stderr or stdout or "").splitlines() if line.strip()]
+    for line in lines:
+        if line.lower().startswith("error:"):
+            message = line[len("error:"):].strip()
+            if message:
+                return message[:MAX_ERROR_CHARS]
+    return lines[-1][:MAX_ERROR_CHARS] if lines else f"exit status {returncode}"
+
+
+def process_group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def wait_for_group_exit(proc: subprocess.Popen, pgid: int) -> bool:
+    deadline = monotonic() + KILL_GRACE_SECONDS
+    while monotonic() < deadline:
+        proc.poll()  # reap the direct child; a zombie still counts as alive
+        if not process_group_alive(pgid):
+            return True
+        sleep(0.05)
+    return False
+
+
+def terminate_process_group(proc: subprocess.Popen) -> None:
+    """Stop caldir and every provider it started: TERM, then KILL."""
+    pgid = proc.pid
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pgid, sig)
+        except ProcessLookupError:
+            break
+        if wait_for_group_exit(proc, pgid):
+            break
+    try:
+        proc.communicate(timeout=KILL_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        # Something left the group and still holds the pipes; stop waiting.
+        for stream in (proc.stdout, proc.stderr):
+            if stream:
+                stream.close()
+        proc.wait()
+
+
+def run_caldir_command(binary: str, args: list[str], timeout: float) -> str:
+    """Run caldir in its own process group and return stdout.
+
+    Raises CaldirMissing when the binary does not exist and CaldirFailed with
+    caldir's own error line on a non-zero exit or a timeout.
+    """
+    try:
+        proc = subprocess.Popen(
+            [binary, *args],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=provider_environment(),
+            start_new_session=True,
+        )
+    except FileNotFoundError as error:
+        raise CaldirMissing(binary) from error
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        terminate_process_group(proc)
+        raise CaldirFailed(f"timed out after {timeout:g} seconds") from None
+    except BaseException:
+        terminate_process_group(proc)
+        raise
+    if proc.returncode != 0:
+        raise CaldirFailed(caldir_error_line(stderr, stdout, proc.returncode))
+    return stdout
+
+
 def pull_calendars(binary: str) -> None:
     """Fetch remote changes into the local caldir. Read-only: never pushes."""
-    result = subprocess.run(
-        [binary, "pull"],
-        capture_output=True,
-        text=True,
-        timeout=PULL_TIMEOUT_SECONDS,
-        env=provider_environment(),
-        stdin=subprocess.DEVNULL,
-    )
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip().splitlines()
-        raise ValueError(detail[-1][:200] if detail else f"exit status {result.returncode}")
+    run_caldir_command(binary, ["pull"], PULL_TIMEOUT_SECONDS)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     today = date.today()
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = ExporterArgumentParser(description=__doc__)
     parser.add_argument("--caldir-bin", default=default_caldir_binary())
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--from", dest="from_date", default=(today - timedelta(days=DEFAULT_PAST_DAYS)).isoformat())
     parser.add_argument("--to", dest="to_date", default=(today + timedelta(days=DEFAULT_FUTURE_DAYS)).isoformat())
-    parser.add_argument("--pull", action="store_true", help="run caldir pull before exporting")
+    parser.add_argument(
+        "--pull",
+        action="store_true",
+        help="run caldir pull first, unless the last successful pull is newer than --pull-interval",
+    )
+    parser.add_argument(
+        "--pull-interval",
+        type=non_negative_int,
+        default=DEFAULT_PULL_INTERVAL_SECONDS,
+        metavar="SECONDS",
+        help=f"minimum age of the last successful pull before --pull pulls again (default {DEFAULT_PULL_INTERVAL_SECONDS})",
+    )
+    parser.add_argument("--force-pull", action="store_true", help="run caldir pull regardless of --pull-interval")
     return parser.parse_args(argv)
+
+
+class ExporterArgumentParser(argparse.ArgumentParser):
+    """argparse exits 2 on a usage error; the panel's contract wants 1."""
+
+    def error(self, message: str):  # type: ignore[override]
+        self.exit(EXIT_FAILED, f"caldir export failed: {message[:MAX_ERROR_CHARS]}\n")
+
+
+def non_negative_int(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be a whole number of seconds") from None
+    if number < 0:
+        raise argparse.ArgumentTypeError("must not be negative")
+    return number
 
 
 def read_toml(path: Path) -> dict[str, Any]:
@@ -105,7 +254,8 @@ def read_toml(path: Path) -> dict[str, Any]:
         with path.open("rb") as handle:
             value = tomllib.load(handle)
             return value if isinstance(value, dict) else {}
-    except (OSError, tomllib.TOMLDecodeError):
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        # One unreadable calendar config must not abort the whole export.
         return {}
 
 
@@ -140,18 +290,49 @@ def calendar_metadata(caldir_root: Path) -> dict[str, dict[str, Any]]:
     return metadata
 
 
+def canonical_hostname(raw: str) -> str:
+    if len(raw) > MAX_HOSTNAME:
+        return ""
+    host = raw.lower()
+    if host.endswith("."):
+        host = host[:-1]
+    if not HOSTNAME_RE.fullmatch(host):
+        return ""
+    # A numeric-looking last label makes a WHATWG parser read an IPv4 address.
+    if NUMERIC_LABEL_RE.fullmatch(host.rsplit(".", 1)[-1]):
+        return ""
+    return host
+
+
+def strict_meeting_url(raw: str) -> str:
+    """Return the canonical form of one allowlisted https meeting link, or ""."""
+    if not isinstance(raw, str) or len(raw) > MAX_URL:
+        return ""
+    # No whitespace, controls, non-ASCII, backslashes or quotes anywhere, and
+    # no escapes that decode to a control, a backslash or another escape.
+    if URL_FORBIDDEN_RE.search(raw) or URL_BAD_ESCAPE_RE.search(raw):
+        return ""
+    parts = URL_PARTS_RE.fullmatch(raw)
+    if not parts:
+        return ""
+    # The authority match also refuses userinfo (@) and escapes (%).
+    authority = AUTHORITY_RE.fullmatch(parts.group(2))
+    if not authority:
+        return ""
+    port = authority.group(2)
+    if port is not None and int(port) != 443:
+        return ""
+    host = canonical_hostname(authority.group(1))
+    if not host or not any(host == allowed or host.endswith("." + allowed) for allowed in MEETING_HOSTS):
+        return ""
+    return "https://" + host + (parts.group(3) or "/")
+
+
 def safe_meeting_url(*values: Any) -> str:
     for value in values:
         for match in URL_RE.findall(str(value or "")):
-            candidate = match.rstrip(".,;:!?)]}")
-            try:
-                parts = urlsplit(candidate)
-            except ValueError:
-                continue
-            host = (parts.hostname or "").lower().rstrip(".")
-            if parts.scheme.lower() != "https" or not host:
-                continue
-            if any(host == allowed or host.endswith("." + allowed) for allowed in MEETING_HOSTS):
+            candidate = strict_meeting_url(match.rstrip(".,;:!?)]}"))
+            if candidate:
                 return candidate
     return ""
 
@@ -190,27 +371,32 @@ def ics_meeting_urls(caldir_root: Path) -> dict[tuple[str, str], str]:
         except OSError:
             continue
         for path in files:
-            in_event = False
             uid = ""
             meeting_url = ""
+            # Open components, innermost last. Only properties directly on a
+            # VEVENT count: a VALARM inside it may carry its own UID (RFC 9074)
+            # and must not relabel the event.
+            components: list[str] = []
             try:
-                lines = unfolded_ics_lines(path)
-                for line in lines:
-                    upper = line.upper()
-                    if upper == "BEGIN:VEVENT":
-                        in_event = True
-                        uid = ""
-                        meeting_url = ""
-                        continue
-                    if upper == "END:VEVENT":
-                        if uid and meeting_url:
-                            found.setdefault((calendar.name, uid), meeting_url)
-                        in_event = False
-                        continue
-                    if not in_event or ":" not in line:
+                for line in unfolded_ics_lines(path):
+                    if ":" not in line:
                         continue
                     raw_name, value = line.split(":", 1)
                     name = raw_name.split(";", 1)[0].rsplit(".", 1)[-1].upper()
+                    if name == "BEGIN":
+                        components.append(value.strip().upper())
+                        if components[-1] == "VEVENT":
+                            uid = ""
+                            meeting_url = ""
+                        continue
+                    if name == "END":
+                        if components and components[-1] == value.strip().upper():
+                            closed = components.pop()
+                            if closed == "VEVENT" and uid and meeting_url:
+                                found.setdefault((calendar.name, uid), meeting_url)
+                        continue
+                    if not components or components[-1] != "VEVENT":
+                        continue
                     if name == "UID":
                         uid = unescape_ics_text(value.strip())
                     elif name in ICS_MEETING_PROPERTIES and not meeting_url:
@@ -285,11 +471,15 @@ def normalized_event(
     if not isinstance(raw, dict):
         return []
     instance_id = str(raw.get("instance_id") or "").strip()
-    title = str(raw.get("title") or "").strip()
+    title = str(raw.get("title") or "").strip()[:MAX_TITLE_CHARS]
     start = str(raw.get("start") or "").strip()
     end = str(raw.get("end") or start).strip()
     slug = str(raw.get("calendar") or "").strip()
     if not instance_id or not title or not start or not slug:
+        return []
+    # Identifiers and timestamps cannot be shortened without changing their
+    # meaning, so an oversized one drops the event instead.
+    if any(len(value) > MAX_ID_CHARS for value in (instance_id, start, end, slug)):
         return []
 
     all_day = bool(raw.get("all_day", False))
@@ -306,13 +496,13 @@ def normalized_event(
     base: dict[str, Any] = {
         "id": instance_id,
         "calendarId": slug,
-        "calendarName": str(cal.get("name") or slug),
+        "calendarName": str(cal.get("name") or slug)[:MAX_CALENDAR_NAME_CHARS],
         "color": str(cal.get("color") or fallback_color(slug)),
         "start": start,
         "end": end,
         "allDay": all_day,
         "title": title,
-        "location": str(raw.get("location") or ""),
+        "location": str(raw.get("location") or "")[:MAX_LOCATION_CHARS],
     }
     if meeting_url:
         base["meetingUrl"] = meeting_url
@@ -362,20 +552,14 @@ def normalize_events(
         row["title"].casefold(),
         row["id"],
     ))
-    return rows
+    # Keep the earliest rows: the window starts in the past, so the cut falls
+    # on the far future rather than on today.
+    return rows[:MAX_EVENTS]
 
 
 def run_caldir(binary: str, from_date: str, to_date: str) -> list[dict[str, Any]]:
-    result = subprocess.run(
-        [binary, "--json", "events", "--from", from_date, "--to", to_date],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=60,
-        env=provider_environment(),
-        stdin=subprocess.DEVNULL,
-    )
-    parsed = json.loads(result.stdout)
+    stdout = run_caldir_command(binary, ["--json", "events", "--from", from_date, "--to", to_date], EVENTS_TIMEOUT_SECONDS)
+    parsed = json.loads(stdout)
     if not isinstance(parsed, list):
         raise ValueError("caldir JSON output is not an array")
     return parsed
@@ -388,9 +572,23 @@ def validate_document(document: Any) -> None:
         raise ValueError("missing syncedAt")
     if not isinstance(document.get("source"), str) or not document["source"]:
         raise ValueError("missing source")
+    pulled_at = document.get("pulledAt")
+    if pulled_at is not None and (not isinstance(pulled_at, str) or parse_iso_utc(pulled_at) is None):
+        raise ValueError("pulledAt is invalid")
     events = document.get("events")
     if not isinstance(events, list):
         raise ValueError("events must be an array")
+    if len(events) > MAX_EVENTS:
+        raise ValueError(f"more than {MAX_EVENTS} events")
+    limits = {
+        "id": MAX_ID_CHARS,
+        "calendarId": MAX_ID_CHARS,
+        "start": MAX_ID_CHARS,
+        "end": MAX_ID_CHARS,
+        "title": MAX_TITLE_CHARS,
+        "location": MAX_LOCATION_CHARS,
+        "calendarName": MAX_CALENDAR_NAME_CHARS,
+    }
     required = ("id", "calendarId", "calendarName", "color", "dateKey", "start", "end", "allDay", "title", "location")
     for index, event in enumerate(events):
         if not isinstance(event, dict):
@@ -398,6 +596,9 @@ def validate_document(document: Any) -> None:
         for field in required:
             if field not in event:
                 raise ValueError(f"events[{index}].{field} is missing")
+        for field, limit in limits.items():
+            if not isinstance(event[field], str) or len(event[field]) > limit:
+                raise ValueError(f"events[{index}].{field} is invalid or too long")
         if not HEX_COLOR_RE.fullmatch(str(event["color"])):
             raise ValueError(f"events[{index}].color is invalid")
         if parse_date_value(event["dateKey"]) is None or len(str(event["dateKey"])) != 10:
@@ -409,6 +610,20 @@ def validate_document(document: Any) -> None:
             raise ValueError(f"events[{index}].meetingUrl is unsafe")
 
 
+def iso_utc(moment: datetime) -> str:
+    return moment.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def parse_iso_utc(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value or len(value) > 64:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
 def build_document(
     raw_events: Any,
     metadata: dict[str, dict[str, Any]],
@@ -416,11 +631,13 @@ def build_document(
     meeting_urls: dict[tuple[str, str], str] | None = None,
     from_date: date | None = None,
     to_date: date | None = None,
+    pulled_at: datetime | None = None,
 ) -> dict[str, Any]:
     timestamp = now or datetime.now(timezone.utc)
     document = {
         "version": CONTRACT_VERSION,
-        "syncedAt": timestamp.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "syncedAt": iso_utc(timestamp),
+        "pulledAt": iso_utc(pulled_at) if pulled_at else None,
         "source": "caldir",
         "events": normalize_events(raw_events, metadata, meeting_urls, from_date, to_date),
     }
@@ -428,12 +645,20 @@ def build_document(
     return document
 
 
+def encode_document(document: dict[str, Any]) -> bytes:
+    validate_document(document)
+    payload = (json.dumps(document, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    if len(payload) > MAX_DOCUMENT_BYTES:
+        raise ValueError(f"export is larger than {MAX_DOCUMENT_BYTES // (1024 * 1024)} MB; not written")
+    return payload
+
+
 def atomic_write(path: Path, document: dict[str, Any]) -> None:
+    payload = encode_document(document)
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(document, ensure_ascii=False, indent=2) + "\n"
     fd, temporary = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        with os.fdopen(fd, "wb") as handle:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
@@ -458,6 +683,38 @@ def acquire_export_lock(output: Path):
     return handle
 
 
+def previous_pulled_at(output: Path) -> datetime | None:
+    """The last successful pull recorded in the current export, if any."""
+    try:
+        with output.open("rb") as handle:
+            payload = handle.read(MAX_DOCUMENT_BYTES + 1)
+        if len(payload) > MAX_DOCUMENT_BYTES:
+            return None
+        document = json.loads(payload)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(document, dict) or document.get("version") != CONTRACT_VERSION:
+        return None
+    return parse_iso_utc(document.get("pulledAt"))
+
+
+def pull_is_due(pulled_at: datetime | None, now: datetime, interval_seconds: int) -> bool:
+    if pulled_at is None:
+        return True
+    age = (now - pulled_at).total_seconds()
+    # A pull stamped in the future means the clock moved; do not trust it.
+    return age < 0 or age >= interval_seconds
+
+
+def describe_error(error: BaseException) -> str:
+    if isinstance(error, json.JSONDecodeError):
+        return "caldir returned invalid JSON"
+    if isinstance(error, OSError) and error.strerror:
+        detail = f"{error.strerror}: {error.filename}" if error.filename else error.strerror
+        return detail[:MAX_ERROR_CHARS]
+    return (str(error) or type(error).__name__)[:MAX_ERROR_CHARS]
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     output = args.output.expanduser()
@@ -465,35 +722,53 @@ def main(argv: list[str] | None = None) -> int:
     try:
         lock_handle = acquire_export_lock(output)
         if lock_handle is None:
-            return 0
-        config_path = default_config_path().resolve()
-        root = configured_caldir(config_path)
+            # Another panel is exporting. Nothing done; the caller keeps its
+            # current state and tries again later.
+            return EXIT_BUSY
         from_date = date.fromisoformat(args.from_date)
         to_date = date.fromisoformat(args.to_date)
         if to_date < from_date:
             raise ValueError("--to must not be before --from")
+        config_path = default_config_path().resolve()
+        root = configured_caldir(config_path)
+        now = datetime.now(timezone.utc)
+        pulled_at = previous_pulled_at(output)
         pull_error = None
-        if args.pull:
+        if args.force_pull or (args.pull and pull_is_due(pulled_at, now, args.pull_interval)):
             try:
                 pull_calendars(args.caldir_bin)
+                pulled_at = datetime.now(timezone.utc)
             except (OSError, ValueError, subprocess.SubprocessError) as error:
                 # Still export what is on disk; report the pull failure after.
                 pull_error = error
         metadata = calendar_metadata(root)
         meeting_urls = ics_meeting_urls(root)
         raw = run_caldir(args.caldir_bin, args.from_date, args.to_date)
-        document = build_document(raw, metadata, meeting_urls=meeting_urls, from_date=from_date, to_date=to_date)
+        document = build_document(
+            raw,
+            metadata,
+            meeting_urls=meeting_urls,
+            from_date=from_date,
+            to_date=to_date,
+            pulled_at=pulled_at,
+        )
         atomic_write(output, document)
         if pull_error is not None:
-            print(f"caldir pull failed: {pull_error}", file=sys.stderr)
-            return 2
-    except (OSError, ValueError, subprocess.SubprocessError, json.JSONDecodeError) as error:
-        print(f"caldir export failed: {error}", file=sys.stderr)
-        return 1
+            print(f"caldir pull failed: {describe_error(pull_error)}", file=sys.stderr)
+            return EXIT_PULL_FAILED
+    except CaldirMissing as error:
+        print(f"caldir export failed: caldir not found: {str(error)[:MAX_ERROR_CHARS]}", file=sys.stderr)
+        return EXIT_CALDIR_MISSING
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        print(f"caldir export failed: {describe_error(error)}", file=sys.stderr)
+        return EXIT_FAILED
+    except Exception as error:  # noqa: BLE001 - the panel needs one clean line, not a traceback
+        print(f"caldir export failed: {type(error).__name__}: {describe_error(error)}", file=sys.stderr)
+        return EXIT_FAILED
     finally:
         if lock_handle is not None:
             lock_handle.close()
-    return 0
+    return EXIT_OK
 
 
 if __name__ == "__main__":

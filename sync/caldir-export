@@ -1,3 +1,15 @@
 #!/bin/sh
+# Exit codes are documented in caldir_export.py. python3 itself exits 2 when it
+# cannot open the script, so a missing script or interpreter is reported here
+# as an ordinary failure (1) instead.
 set -eu
-exec python3 "$(dirname "$0")/caldir_export.py" "$@"
+script="$(dirname "$0")/caldir_export.py"
+if [ ! -r "$script" ]; then
+  echo "caldir export failed: cannot read $script" >&2
+  exit 1
+fi
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "caldir export failed: python3 not found" >&2
+  exit 1
+fi
+exec python3 "$script" "$@"

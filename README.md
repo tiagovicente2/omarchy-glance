@@ -4,6 +4,8 @@
 with one panel: a month calendar, the day's agenda from your calendars, and
 your recent notifications.
 
+![Omarchy Glance panel with a month calendar, today's agenda and recent notifications](preview.png)
+
 ## Install
 
 ```bash

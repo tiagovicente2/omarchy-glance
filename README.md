@@ -12,7 +12,15 @@ omarchy plugin add https://github.com/tiagovicente2/omarchy-glance.git --enable
 
 Glance takes the built-in clock's place. Disable or remove it and the stock
 clock comes back. Calendars need [caldir](#dependencies); once it is
-connected, Glance pulls new events every five minutes on its own.
+connected, Glance pulls new events on its own.
+
+Upgrading from an early version that installed `caldir-sync.timer`? Remove it,
+because that timer also pushes calendar changes:
+
+```bash
+systemctl --user disable --now caldir-sync.timer
+rm -f ~/.config/systemd/user/caldir-sync.{service,timer}
+```
 
 ## Features
 
@@ -22,12 +30,14 @@ connected, Glance pulls new events every five minutes on its own.
   starts (15 minutes by default)
 - **Notifications**: your 30 most recent, grouped by day, with image and
   screen-recording previews. Click one to run its action or focus its app, or
-  dismiss them one by one or all at once
+  dismiss them one by one or all at once. Dismissing hides them in Glance;
+  Omarchy's own history keeps them until its 24-hour cleanup
 - **Unread dot** on the clock when something new arrives
 - **Calendar**: month grid with ISO week numbers, colored dots for days that
   have events, and a switchable week start
-- **Calendar sync**: runs `caldir pull` every five minutes while Omarchy is
-  running. Read-only, and switchable in Settings
+- **Calendar sync**: runs `caldir pull` at most every five minutes while
+  Omarchy is running, including when you open the panel. Read-only, and
+  switchable in Settings
 - **Settings**: hide calendars, hide declined invitations, and show year or
   life progress
 - **Keyboard**: `↑` `↓` move through notifications, `←` `→` or `[` `]` change
@@ -39,7 +49,8 @@ connected, Glance pulls new events every five minutes on its own.
 - [caldir](https://github.com/t4t5/caldir) 0.12 or newer, with a calendar
   connected (`caldir connect google`, `icloud`, `outlook` or `caldav`)
 - `python3`, `jq` and `inotify-tools`
-- Optional: `ffmpegthumbnailer` or `ffmpeg`, for screen-recording thumbnails
+- Optional: `ffmpegthumbnailer` or `ffmpeg`, for thumbnails of screen
+  recordings saved in your Videos folder
 
 Everything except caldir ships with Omarchy. Install caldir from source,
 pinned to the reviewed release:
@@ -82,7 +93,8 @@ known limitations.
 ## Credits
 
 - [Omarchy](https://github.com/basecamp/omarchy): the built-in clock this
-  started from (MIT)
+  started from, its `WallClock` timer and UTC month-grid math, and the
+  notification safety rules in `NotificationSafety.js` (MIT)
 - [tmn73/omarchy-calendar](https://github.com/tmn73/omarchy-calendar): calendar
   event model and interface (MIT)
 - [jankeesvw/omarchy-notification-center](https://github.com/jankeesvw/omarchy-notification-center):

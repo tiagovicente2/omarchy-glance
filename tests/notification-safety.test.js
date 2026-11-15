@@ -431,9 +431,18 @@ test("bin/glance-thumb restricts thumbnails to XDG videos dir, rejects FIFOs, an
     assert.equal(ffmpegLines.length, 1)
     assert.equal(fs.existsSync(ffmpegLines[0].thumb), true)
 
-    // Also confirm the script passes -protocol_whitelist file to ffmpeg
+    // Also confirm the script passes a protocol whitelist to ffmpeg, and that
+    // --stdin reads paths from stdin so they stay out of argv
     const thumbScript = fs.readFileSync(THUMB_BIN, "utf8")
     assert.match(thumbScript, /ffmpeg\b[^\n]*-protocol_whitelist\s+file\b/)
+    const viaStdin = execFileSync(THUMB_BIN, ["--stdin"], {
+      env,
+      encoding: "utf8",
+      input: `${validVid}\n/etc/passwd\n--end--\n`
+    }).trim()
+    const stdinLines = viaStdin ? viaStdin.split("\n").map((l) => JSON.parse(l)) : []
+    assert.equal(stdinLines.length, 1)
+    assert.equal(stdinLines[0].file, validVid)
   })
 })
 
@@ -589,5 +598,49 @@ printf 'focus-app:%s\\n' "$1" >> "${logFile}"
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10)
     }
     assert.equal(fs.readFileSync(logFile, "utf8").trim(), "uwsm-app:-- my-app.desktop")
+  })
+})
+
+// Maintainer finding (marketplace #15001): notification text must never reach
+// a child process's argv, which other local accounts can read in /proc.
+test("historyLoader never puts notification text in child-process arguments", () => {
+  const qml = fs.readFileSync(HISTORY_QML_PATH, "utf8")
+  const loaderScript = extractQmlStringBlock(qml, 'historyLoader.command = ["bash", "-c",', '"--", popupDir')
+  if (process.env.GLANCE_SKIP_STATIC !== "1") {
+    assert.equal(/--argjson\s+entries|--arg\s+v\b|printf '%s\\n' "\$entries"/.test(loaderScript), false)
+  }
+
+  withTempDir((tmp) => {
+    const popupsDir = path.join(tmp, "notifications")
+    const histDir = path.join(popupsDir, "history")
+    const glanceState = path.join(tmp, "glance")
+    fs.mkdirSync(histDir, { recursive: true })
+    fs.mkdirSync(glanceState, { recursive: true })
+    const secret = "SECRET-" + process.pid + "-" + Date.now()
+    const rows = []
+    for (let i = 0; i < 30; i++) rows.push({ key: "k" + i, ts: 9999999999 - i, summary: secret, body: secret })
+    fs.writeFileSync(path.join(popupsDir, "history.json"), JSON.stringify(rows))
+    fs.writeFileSync(path.join(popupsDir, "live.json"), "[]")
+
+    // Wrap every command the loader runs so each one logs its argv. Sampling
+    // /proc instead misses short-lived children such as jq.
+    const wrapDir = path.join(tmp, "wrap")
+    const argvLog = path.join(tmp, "argv.log")
+    fs.mkdirSync(wrapDir)
+    for (const cmd of ["jq", "awk", "stat", "find", "realpath", "mktemp", "rm", "basename"]) {
+      const real = spawnSync("bash", ["-c", `command -v ${cmd}`], { encoding: "utf8" }).stdout.trim()
+      if (!real) continue
+      fs.writeFileSync(path.join(wrapDir, cmd),
+        `#!/bin/bash\nprintf '%s\\0' "$@" >> "${argvLog}"\nexec "${real}" "$@"\n`, { mode: 0o755 })
+    }
+    execFileSync("bash", ["-c", loaderScript, "--", popupsDir, histDir, glanceState], {
+      env: { ...process.env, PATH: `${wrapDir}:${process.env.PATH}` },
+      encoding: "utf8"
+    })
+    const logged = fs.existsSync(argvLog) ? fs.readFileSync(argvLog, "utf8") : ""
+    assert.ok(logged.length > 0, "wrappers recorded the loader's commands")
+    assert.equal(logged.includes(secret), false)
+    // The private scratch directory is removed after each run.
+    assert.deepEqual(fs.readdirSync(glanceState).filter((n) => n.startsWith(".load.")), [])
   })
 })

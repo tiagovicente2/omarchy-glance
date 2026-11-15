@@ -109,7 +109,7 @@ cmd_unread() {
   local count=0
   if (( ${#files[@]} > 0 )); then
     count=$(
-      jq -r -s --argjson seen "$seen" --argjson tomb "$tomb" '
+      GLANCE_SEEN="$seen" GLANCE_TOMB="$tomb" jq -r -s '
         def to_entries:
           if type == "array" then .[]
           elif type == "object" then .
@@ -117,7 +117,9 @@ cmd_unread() {
           end;
         def valid_key:
           type == "string" and test("^[A-Za-z0-9_-]{1,120}$");
-        ($tomb.clearedBefore // 0) as $cleared
+        ($ENV.GLANCE_SEEN | tonumber? // 0) as $seen
+        | ($ENV.GLANCE_TOMB | fromjson? // {}) as $tomb
+        | ($tomb.clearedBefore // 0) as $cleared
         | ($tomb.dismissedKeys // []) as $dismissed
         | [
             .[]?
@@ -181,7 +183,10 @@ cmd_dismiss_key() {
     flock -w 5 9 || exit 1
     local current updated
     current=$(read_tombstone)
-    updated=$(jq -cn --argjson tomb "$current" --arg key "$key" '
+    updated=$(GLANCE_TOMB="$current" GLANCE_KEY="$key" jq -cn '
+      ($ENV.GLANCE_TOMB | fromjson? // {}) as $tomb
+      | $ENV.GLANCE_KEY as $key
+      |
       {
         clearedBefore: ($tomb.clearedBefore // 0),
         dismissedKeys: (
@@ -207,13 +212,13 @@ cmd_clear_all() {
     local current prev_seen new_cleared new_seen updated
     current=$(read_tombstone)
     prev_seen=$(get_seen)
-    new_cleared=$(jq -rn --argjson tomb "$current" --argjson s "$stamp" '[($tomb.clearedBefore // 0), $s] | max')
+    new_cleared=$(GLANCE_TOMB="$current" GLANCE_STAMP="$stamp" jq -rn '[(($ENV.GLANCE_TOMB | fromjson? // {}).clearedBefore // 0), ($ENV.GLANCE_STAMP | tonumber? // 0)] | max')
     if (( stamp > prev_seen )); then
       new_seen="$stamp"
     else
       new_seen="$prev_seen"
     fi
-    updated=$(jq -cn --argjson c "$new_cleared" '{clearedBefore: $c, dismissedKeys: []}')
+    updated=$(GLANCE_CLEARED="$new_cleared" jq -cn '{clearedBefore: ($ENV.GLANCE_CLEARED | tonumber? // 0), dismissedKeys: []}')
     atomic_write_file "$tombstone_file" "$updated"
     atomic_write_file "$seen_file" "$new_seen"
   ) 9>>"$lock_file"

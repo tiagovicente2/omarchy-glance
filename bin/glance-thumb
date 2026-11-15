@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Make cached first-frame thumbnails for video files named in notifications.
 #
-# Usage: glance-thumb <absolute-video-path>...
+# Usage: glance-thumb --stdin   (paths on stdin, one per line)
+#        glance-thumb <absolute-video-path>...
 # Prints one JSON object per thumbnail that exists after the run:
 #   {"file":"/path/video.mp4","thumb":"/state/omarchy-glance/thumbs/<md5>.jpg"}
 #
@@ -10,6 +11,25 @@
 # skipped silently.
 set -uo pipefail
 umask 077
+# Bash's loadable realpath keeps notification-supplied paths out of child
+# process argv, which other local users can read. Falls back to the external
+# command where the loadable is missing.
+have_builtin_realpath=0
+if enable -f /usr/lib/bash/realpath realpath 2>/dev/null; then have_builtin_realpath=1; fi
+
+# resolve PATH -> REPLY (canonical, must exist). Uses the builtin when present.
+resolve() {
+  REPLY=""
+  if (( have_builtin_realpath )); then
+    local -a r=()
+    realpath -c -q -a r -- "$1" 2>/dev/null || return 1
+    [[ -e ${r[0]:-} ]] || return 1
+    REPLY=${r[0]}
+  else
+    REPLY=$(command realpath -e -- "$1" 2>/dev/null) || return 1
+  fi
+  [[ -n $REPLY ]]
+}
 
 state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
 glance_state="$state_home/omarchy-glance"
@@ -24,7 +44,7 @@ chmod 700 -- "$glance_state" "$thumbs" 2>/dev/null || true
 
 # Resolve the trusted XDG videos directory. Never allow $HOME itself or / if
 # xdg-user-dir falls back to $HOME when XDG_VIDEOS_DIR is unconfigured.
-home_real=$(realpath -e -- "$HOME" 2>/dev/null || printf '%s' "$HOME")
+resolve "$HOME" && home_real=$REPLY || home_real=$HOME
 videos_dir=""
 if command -v xdg-user-dir >/dev/null 2>&1; then
   videos_dir=$(xdg-user-dir VIDEOS 2>/dev/null || true)
@@ -32,7 +52,7 @@ fi
 if [[ -z "$videos_dir" || "$videos_dir" == "$HOME" || "$videos_dir" == "$home_real" || "$videos_dir" == "/" ]]; then
   videos_dir="$HOME/Videos"
 fi
-videos_real=$(realpath -e -- "$videos_dir" 2>/dev/null || true)
+resolve "$videos_dir" && videos_real=$REPLY || videos_real=""
 if [[ -z "$videos_real" || ! -d "$videos_real" || "$videos_real" == "/" || "$videos_real" == "$home_real" ]]; then
   exit 0
 fi
@@ -45,15 +65,21 @@ make_thumb() {
   [[ ! -L "$out" ]] || rm -f -- "$out"
   tmp=$(mktemp "$thumbs/.thumb.XXXXXX.jpg") || return 1
   chmod 600 -- "$tmp"
-  if command -v ffmpegthumbnailer >/dev/null 2>&1; then
-    timeout 10 nice -n 19 ffmpegthumbnailer -i "$src" -o "$tmp" -s "$width" -q 7 -c jpeg >/dev/null 2>&1
-  elif command -v ffmpeg >/dev/null 2>&1; then
-    timeout 10 nice -n 19 ffmpeg -nostdin -loglevel error -y -protocol_whitelist file -ss 0.5 -i "$src" \
-      -frames:v 1 -vf "scale=$width:-2" -f image2 "$tmp" >/dev/null 2>&1
-  else
-    false
+  # The video is handed over as an open descriptor (/dev/fd/3), so its path
+  # never shows up in the decoder's command line.
+  local status=1
+  if exec 3<"$src"; then
+    if command -v ffmpegthumbnailer >/dev/null 2>&1; then
+      timeout 10 nice -n 19 ffmpegthumbnailer -i /dev/fd/3 -o "$tmp" -s "$width" -q 7 -c jpeg >/dev/null 2>&1
+    elif command -v ffmpeg >/dev/null 2>&1; then
+      timeout 10 nice -n 19 ffmpeg -nostdin -loglevel error -y -protocol_whitelist file,pipe,fd -i /dev/fd/3 \
+        -frames:v 1 -vf "scale=$width:-2" -f image2 "$tmp" >/dev/null 2>&1
+    else
+      false
+    fi
+    status=$?
+    exec 3<&-
   fi
-  local status=$?
   if (( status == 0 )) && [[ -s $tmp ]]; then
     mv -f -- "$tmp" "$out"
   else
@@ -62,19 +88,33 @@ make_thumb() {
   fi
 }
 
+# Paths are read from stdin with --stdin (one per line, ended by "--end--" or
+# EOF) so they never appear in this process's argv, which other local users
+# can read. Plain arguments still work for manual use.
+sources=()
+if [[ ${1:-} == --stdin ]]; then
+  while (( ${#sources[@]} < max_files )) && IFS= read -r -t 5 line; do
+    [[ $line == --end-- ]] && break
+    [[ -n $line ]] && sources+=("$line")
+  done
+else
+  sources=("$@")
+fi
+
 count=0
-for src in "$@"; do
+for src in "${sources[@]}"; do
   (( count++ < max_files )) || break
   [[ $src == /* && $src != *$'\n'* && $src != *$'\r'* ]] || continue
   [[ ${src,,} =~ \.(mp4|mkv|webm|mov|avi)$ ]] || continue
   [[ -f $src && -r $src ]] || continue
 
-  src_real=$(realpath -e -- "$src" 2>/dev/null || true)
+  resolve "$src" && src_real=$REPLY || src_real=""
   [[ -n $src_real && -f $src_real && -r $src_real ]] || continue
   [[ ${src_real,,} =~ \.(mp4|mkv|webm|mov|avi)$ ]] || continue
   [[ $src_real == "$videos_real/"* ]] || continue
 
-  hash=$(printf '%s' "$src_real" | md5sum | cut -d' ' -f1)
+  hash=$(printf '%s' "$src_real" | md5sum)
+  hash=${hash%% *}
   out="$thumbs/$hash.jpg"
 
   if [[ ! -s $out || $src_real -nt $out || -L $out ]]; then
@@ -83,5 +123,5 @@ for src in "$@"; do
     touch -- "$out" 2>/dev/null || true
   fi
 
-  jq -cn --arg file "$src" --arg thumb "$out" '{file: $file, thumb: $thumb}'
+  GLANCE_FILE="$src" GLANCE_THUMB="$out" jq -cn '{file: $ENV.GLANCE_FILE, thumb: $ENV.GLANCE_THUMB}'
 done

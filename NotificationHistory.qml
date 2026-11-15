@@ -36,6 +36,7 @@ Item {
   // Video path -> cached thumbnail file URL, filled in by glance-thumb.
   property var videoThumbs: ({})
   property var pendingThumbFiles: []
+  property string thumbInput: ""
   // Verified regular local files checked by historyLoader or glance-thumb.
   property var verifiedFiles: ({})
   // In-memory tombstone mirror so immediate reloads do not resurrect dismissed
@@ -103,6 +104,12 @@ Item {
     activeLoadGeneration = loadGeneration
     historyLoader.command = ["bash", "-c",
       "popup=\"$1\"; hist=\"$2\"; glance_state=\"$3\"\n" +
+      "umask 077\n" +
+      "have_rp=0; enable -f /usr/lib/bash/realpath realpath 2>/dev/null && have_rp=1\n" +
+      "scratch_root=\"$glance_state\"\n" +
+      "[[ -d $scratch_root && ! -L $scratch_root ]] || scratch_root=\"${XDG_RUNTIME_DIR:-/tmp}\"\n" +
+      "work=$(mktemp -d \"$scratch_root/.load.XXXXXX\") || exit 0\n" +
+      "trap 'rm -rf -- \"$work\"' EXIT\n" +
       "files=()\n" +
       "if [[ -d \"$popup\" && ! -L \"$popup\" ]]; then\n" +
       "  for fixed in \"$popup/live.json\" \"$popup/history.json\"; do\n" +
@@ -132,15 +139,15 @@ Item {
       "  printf '{\"entries\":[],\"verifiedFiles\":[]}\\n'\n" +
       "  exit 0\n" +
       "fi\n" +
-      "tomb='{\"clearedBefore\":0,\"dismissedKeys\":[]}'\n" +
+      "printf '%s\\n' '{\"clearedBefore\":0,\"dismissedKeys\":[]}' > \"$work/tomb.json\"\n" +
       "if [[ -n \"$glance_state\" && -d \"$glance_state\" && ! -L \"$glance_state\" && -f \"$glance_state/tombstone.json\" && ! -L \"$glance_state/tombstone.json\" ]]; then\n" +
       "  tsz=$(stat -c %s -- \"$glance_state/tombstone.json\" 2>/dev/null || echo 0)\n" +
       "  if (( tsz > 0 && tsz <= 262144 )); then\n" +
       "    tc=$(jq -c 'if type == \"object\" then {clearedBefore: ((.clearedBefore // 0) | if type == \"number\" and isfinite and . >= 0 then floor else 0 end), dismissedKeys: ((.dismissedKeys // []) | if type == \"array\" then map(select(type == \"string\" and test(\"^[A-Za-z0-9_-]{1,120}$\"))) | .[-500:] else [] end)} else {clearedBefore:0,dismissedKeys:[]} end' \"$glance_state/tombstone.json\" 2>/dev/null || true)\n" +
-      "    [[ -n \"$tc\" ]] && tomb=\"$tc\"\n" +
+      "    [[ -n \"$tc\" ]] && printf '%s\\n' \"$tc\" > \"$work/tomb.json\"\n" +
       "  fi\n" +
       "fi\n" +
-      "entries=$(jq -c -s --argjson tomb \"$tomb\" '\n" +
+      "jq -c -s --slurpfile tombs \"$work/tomb.json\" '\n" +
       "  def to_entries:\n" +
       "    if type == \"array\" then .[]\n" +
       "    elif type == \"object\" then .\n" +
@@ -148,7 +155,8 @@ Item {
       "    end;\n" +
       "  def valid_key:\n" +
       "    type == \"string\" and test(\"^[A-Za-z0-9_-]{1,120}$\");\n" +
-      "  ($tomb.clearedBefore // 0) as $cleared\n" +
+      "  ($tombs[0] // {}) as $tomb\n" +
+      "  | ($tomb.clearedBefore // 0) as $cleared\n" +
       "  | ($tomb.dismissedKeys // []) as $dismissed\n" +
       "  | [\n" +
       "      .[]?\n" +
@@ -173,7 +181,8 @@ Item {
       "  | sort_by(.timestamp)\n" +
       "  | reverse\n" +
       "  | .[0:30]\n" +
-      "' \"${valid_files[@]}\" 2>/dev/null || echo '[]')\n" +
+      "' \"${valid_files[@]}\" > \"$work/entries.json\" 2>/dev/null || printf '[]\\n' > \"$work/entries.json\"\n" +
+      "[[ -s $work/entries.json ]] || printf '[]\\n' > \"$work/entries.json\"\n" +
       "urldecode() {\n" +
       "  local s=\"$1\" out=\"\" hex byte val\n" +
       "  while [[ $s =~ ^([^%]*)%([0-9A-Fa-f]{2})(.*)$ ]]; do\n" +
@@ -210,20 +219,27 @@ Item {
       "  if [[ \"$p\" =~ ^/(var/)?run(/|$) ]] && [[ ! \"$p\" =~ ^/run/user/[0-9]+/. ]]; then return 1; fi\n" +
       "  [[ -f \"$p\" && -r \"$p\" ]] || return 1\n" +
       "  local rp\n" +
-      "  rp=$(realpath -e -- \"$p\" 2>/dev/null) || return 1\n" +
+      "  if (( have_rp )); then\n" +
+      "    local -a rpa=()\n" +
+      "    realpath -c -q -a rpa -- \"$p\" 2>/dev/null || return 1\n" +
+      "    rp=${rpa[0]:-}\n" +
+      "  else\n" +
+      "    rp=$(command realpath -e -- \"$p\" 2>/dev/null) || return 1\n" +
+      "  fi\n" +
+      "  [[ -n $rp ]] || return 1\n" +
       "  [[ -f \"$rp\" && -r \"$rp\" ]] || return 1\n" +
       "  [[ ! \"$rp\" =~ ^/(proc|sys|dev)(/|$) ]] || return 1\n" +
       "  if [[ \"$rp\" =~ ^/(var/)?run(/|$) ]] && [[ ! \"$rp\" =~ ^/run/user/[0-9]+/. ]]; then return 1; fi\n" +
       "  REPLY=\"$p\"\n" +
       "}\n" +
-      "verified=\"\"\n" +
+      ": > \"$work/verified.txt\"\n" +
       "while IFS= read -r cand; do\n" +
       "  [[ -n \"$cand\" ]] || continue\n" +
       "  if check_local_regular_file \"$cand\"; then\n" +
-      "    verified+=\"$REPLY\"$'\\n'\n" +
+      "    printf '%s\\n' \"$REPLY\" >> \"$work/verified.txt\"\n" +
       "  fi\n" +
       "done < <(\n" +
-      "  printf '%s\\n' \"$entries\" | jq -r '\n" +
+      "  jq -r '\n" +
       "    def exec_items:\n" +
       "      if type == \"array\" then .[]\n" +
       "      elif type == \"string\" then\n" +
@@ -248,10 +264,10 @@ Item {
       "        )\n" +
       "      )\n" +
       "    | select(test(\"[\\r\\n]\") | not)\n" +
-      "  ' 2>/dev/null | awk '!seen[$0]++'\n" +
+      "  ' \"$work/entries.json\" 2>/dev/null | awk '!seen[$0]++'\n" +
       ")\n" +
-      "jq -cn --argjson entries \"$entries\" --arg v \"$verified\" \\\n" +
-      "  '{entries: $entries, verifiedFiles: ($v | split(\"\\n\") | map(select(length > 0)) | unique)}'",
+      "jq -cn --slurpfile e \"$work/entries.json\" --rawfile v \"$work/verified.txt\" \\\n" +
+      "  '{entries: ($e[0] // []), verifiedFiles: ($v | split(\"\\n\") | map(select(length > 0)) | unique)}'",
       "--", popupDir, historyDir, glanceStateDir]
     historyLoader.running = true
   }
@@ -530,8 +546,8 @@ Item {
     "    if (val != \"\") { print val; exit 0 }\n" +
     "  }\n" +
     "' \"$desktop\" 2>/dev/null)\n" +
-    "address=$(hyprctl clients -j 2>/dev/null | jq -r --arg id \"$id\" --arg wmclass \"$wmclass\" --arg app \"$app\" '\n" +
-    "  ([$id, $wmclass, $app] | map(select(type == \"string\" and length > 0) | ascii_downcase)) as $needles\n" +
+    "address=$(hyprctl clients -j 2>/dev/null | GLANCE_ID=\"$id\" GLANCE_WMCLASS=\"$wmclass\" GLANCE_APP=\"$app\" jq -r '\n" +
+    "  ([$ENV.GLANCE_ID, $ENV.GLANCE_WMCLASS, $ENV.GLANCE_APP] | map(select(type == \"string\" and length > 0) | ascii_downcase)) as $needles\n" +
     "  | first(\n" +
     "      .[]\n" +
     "      | select(\n" +
@@ -756,7 +772,9 @@ Item {
       root.pendingThumbFiles = files
       return
     }
-    thumbLoader.command = [root.thumbBinPath].concat(files)
+    // Paths go over stdin, not argv: argv is readable by other local users.
+    root.thumbInput = files.join("\n") + "\n"
+    thumbLoader.command = [root.thumbBinPath, "--stdin"]
     thumbLoader.running = true
   }
 
@@ -791,6 +809,10 @@ Item {
   Process {
     id: thumbLoader
     running: false
+    stdinEnabled: true
+    // Quickshell cannot close a child's stdin, so a final "--end--" line ends
+    // the list instead.
+    onStarted: thumbLoader.write(root.thumbInput + "--end--\n")
     onExited: {
       if (root.pendingThumbFiles.length === 0) return
       var files = root.pendingThumbFiles

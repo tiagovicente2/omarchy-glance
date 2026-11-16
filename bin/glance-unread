@@ -235,8 +235,12 @@ cmd_watch() {
     exit 0
   }
 
+  # Only the notification folders are watched. Glance's own state folder is
+  # written whenever the panel opens (seen marker, lock, scratch files), and
+  # watching it made every open reload the list again, which made image
+  # previews flicker. Tombstone changes are applied by the panel directly.
   exec inotifywait -m -q -e close_write -e moved_to -e delete --format '%e %w%f' \
-    "$popups" "$history" "$glance_state" 2>/dev/null
+    "$popups" "$history" 2>/dev/null
 }
 
 case "${1:-}" in

@@ -39,6 +39,9 @@ Item {
   property string thumbInput: ""
   // Verified regular local files checked by historyLoader or glance-thumb.
   property var verifiedFiles: ({})
+  // The last loader payload. A reload that returns the same text keeps the
+  // list as it is, so delegates and their decoded previews are not rebuilt.
+  property string lastHistoryPayload: ""
   // In-memory tombstone mirror so immediate reloads do not resurrect dismissed
   // entries before glance-unread finishes writing tombstone.json.
   property double localClearedBefore: 0
@@ -106,7 +109,8 @@ Item {
       "popup=\"$1\"; hist=\"$2\"; glance_state=\"$3\"\n" +
       "umask 077\n" +
       "have_rp=0; enable -f /usr/lib/bash/realpath realpath 2>/dev/null && have_rp=1\n" +
-      "scratch_root=\"$glance_state\"\n" +
+      "scratch_root=\"$glance_state/tmp\"\n" +
+      "[[ -d $glance_state && ! -L $glance_state && ! -L $scratch_root ]] && mkdir -p -m 700 -- \"$scratch_root\" 2>/dev/null\n" +
       "[[ -d $scratch_root && ! -L $scratch_root ]] || scratch_root=\"${XDG_RUNTIME_DIR:-/tmp}\"\n" +
       "work=$(mktemp -d \"$scratch_root/.load.XXXXXX\") || exit 0\n" +
       "trap 'rm -rf -- \"$work\"' EXIT\n" +
@@ -274,6 +278,9 @@ Item {
 
   function replaceHistory(raw) {
     if (discardPendingResults || activeLoadGeneration !== loadGeneration) return
+    var payloadText = String(raw || "").trim()
+    if (payloadText !== "" && payloadText === root.lastHistoryPayload && historyModel.count > 0) return
+    root.lastHistoryPayload = payloadText
     historyModel.clear()
     var entries = []
     var verifiedMap = ({})
@@ -390,6 +397,7 @@ Item {
       "[[ -x $unreadbin ]] && \"$unreadbin\" clear-all \"$stamp\" >/dev/null 2>&1 || true",
       "--", unreadBinPath, String(clearedAt)])
 
+    root.lastHistoryPayload = ""
     historyModel.clear()
     root.deactivateCursor()
   }
@@ -438,6 +446,7 @@ Item {
       "[[ -x $unreadbin ]] && \"$unreadbin\" dismiss-key \"$key\" >/dev/null 2>&1 || true",
       "--", unreadBinPath, key])
 
+    root.lastHistoryPayload = ""
     historyModel.remove(index)
     root.clampCursor()
   }

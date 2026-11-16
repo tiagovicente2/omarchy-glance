@@ -644,3 +644,73 @@ test("historyLoader never puts notification text in child-process arguments", ()
     assert.deepEqual(fs.readdirSync(glanceState).filter((n) => n.startsWith(".load.")), [])
   })
 })
+
+// Regression: the loader's scratch files must not live where `glance-unread
+// watch` looks, or deleting them reports a change, which reloads the list,
+// which makes new scratch files: the list flickered about 26 times a second.
+test("historyLoader scratch files do not trigger the notification watcher", () => {
+  if (!commandExists("inotifywait")) return
+  const qml = fs.readFileSync(HISTORY_QML_PATH, "utf8")
+  const loaderScript = extractQmlStringBlock(qml, 'historyLoader.command = ["bash", "-c",', '"--", popupDir')
+
+  withTempDir((tmp) => {
+    const stateHome = path.join(tmp, "state")
+    const popupsDir = path.join(stateHome, "omarchy", "notifications")
+    const histDir = path.join(popupsDir, "history")
+    const glanceState = path.join(stateHome, "omarchy-glance")
+    fs.mkdirSync(histDir, { recursive: true })
+    fs.mkdirSync(glanceState, { recursive: true, mode: 0o700 })
+    fs.writeFileSync(path.join(popupsDir, "history.json"), JSON.stringify([{ key: "k1", ts: 9999999999, summary: "x" }]))
+    fs.writeFileSync(path.join(popupsDir, "live.json"), "[]")
+
+    // Watch exactly what `glance-unread watch` watches while the loader runs.
+    const script = `
+      inotifywait -m -q -e close_write -e moved_to -e delete --format '%e %w%f' "$1" "$2" "$3" > "$4" 2>/dev/null &
+      w=$!
+      sleep 0.3
+      for i in 1 2 3; do bash -c "$LOADER" -- "$1" "$2" "$3" > /dev/null; done
+      sleep 0.3
+      kill "$w" 2>/dev/null; wait "$w" 2>/dev/null
+      true`
+    const events = path.join(tmp, "events.log")
+    execFileSync("bash", ["-c", script, "--", popupsDir, histDir, glanceState, events], {
+      env: { ...process.env, LOADER: loaderScript, XDG_STATE_HOME: stateHome },
+      encoding: "utf8"
+    })
+    assert.equal(fs.readFileSync(events, "utf8").trim(), "")
+    assert.deepEqual(fs.readdirSync(path.join(glanceState, "tmp")), [])
+  })
+})
+
+// Regression: opening the panel writes Glance's own state (seen marker, lock),
+// so the watcher must not watch that folder, or every open reloads the list
+// again and image previews flicker.
+test("glance-unread watch ignores Glance's own state folder", () => {
+  if (!commandExists("inotifywait")) return
+  withTempDir((tmp) => {
+    const env = { ...process.env, XDG_STATE_HOME: tmp, HOME: tmp }
+    const script = `
+      "$1" watch > "$2" &
+      w=$!
+      sleep 0.4
+      "$1" mark-seen > /dev/null
+      "$1" dismiss-key abc_1 > /dev/null
+      sleep 0.4
+      kill "$w" 2>/dev/null; pkill -P "$w" 2>/dev/null; wait "$w" 2>/dev/null
+      true`
+    const out = path.join(tmp, "watch.out")
+    execFileSync("bash", ["-c", script, "--", UNREAD_BIN, out], { env, encoding: "utf8" })
+    assert.equal(fs.readFileSync(out, "utf8").trim(), "")
+  })
+})
+
+// Regression: a reload that returns the same payload must not rebuild the
+// list, so decoded image previews stay on screen.
+test("NotificationHistory.replaceHistory skips identical payloads", () => {
+  const qml = fs.readFileSync(HISTORY_QML_PATH, "utf8")
+  const fn = qml.slice(qml.indexOf("function replaceHistory("), qml.indexOf("historyModel.clear()", qml.indexOf("function replaceHistory(")))
+  assert.match(fn, /payloadText === root\.lastHistoryPayload && historyModel\.count > 0\) return/)
+  // Local edits reset the cache so the next load always applies.
+  assert.match(qml.slice(qml.indexOf("function dismissAll("), qml.indexOf("function isFocusableApp(")), /lastHistoryPayload = ""/)
+  assert.match(qml.slice(qml.indexOf("function dismissHistoryEntry("), qml.indexOf("function parseExecArgv(") > 0 ? qml.indexOf("function parseExecArgv(") : undefined), /lastHistoryPayload = ""/)
+})
